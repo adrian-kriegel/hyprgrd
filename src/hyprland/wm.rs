@@ -150,7 +150,9 @@ impl WindowManager for HyprlandWm {
         // Hyprland dispatches are global — we focus the target monitor first,
         // then switch.
         ipc_dispatch(&format!("focusmonitor {}", monitor))?;
-        ipc_dispatch(&format!("workspace {}", workspace_id))?;
+        // Keep the switch scoped to the monitor we just focused, even if the
+        // workspace currently "belongs" to a different monitor (e.g. after DPMS/off-on).
+        ipc_dispatch(&format!("focusworkspaceoncurrentmonitor {}", workspace_id))?;
         Ok(())
     }
 

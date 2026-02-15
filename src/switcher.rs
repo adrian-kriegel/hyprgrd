@@ -150,16 +150,14 @@ impl<W: WindowManager> GridSwitcher<W> {
         match cmd {
             Command::SwitchTo(SwitchToTarget { x, y }) => {
                 info!("switch to ({}, {})", x, y);
-                let already_there = self.position() == (x, y);
                 self.grid.grow_to_contain(x, y);
                 for pos in &mut self.monitor_positions {
                     pos.col = x;
                     pos.row = y;
                 }
-                if !already_there {
-                    if let Err(e) = self.apply_current_workspace() {
-                        warn!("switch failed (will still finalize visualizer): {}", e);
-                    }
+                // Always apply so re-sending current cell or clicking it can repair desync.
+                if let Err(e) = self.apply_current_workspace() {
+                    warn!("switch failed (will still finalize visualizer): {}", e);
                 }
                 // Always flash and hide the visualizer so the UI finalizes.
                 self.show_visualizer(0.0, 0.0);
