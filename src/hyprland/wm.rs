@@ -102,6 +102,7 @@ struct MonitorJson {
     height: u32,
     x: i32,
     y: i32,
+    focused: bool,
 }
 
 /// Subset of the JSON object returned by `j/activewindow`.
@@ -159,6 +160,16 @@ impl WindowManager for HyprlandWm {
 
     fn move_window_to_monitor(&self, monitor: &str) -> Result<(), Self::Error> {
         ipc_dispatch(&format!("movewindow mon:{}", monitor))
+    }
+
+    fn active_monitor(&self) -> Result<Option<String>, Self::Error> {
+        let json = ipc_json("monitors")?;
+        let monitors: Vec<MonitorJson> = serde_json::from_str(&json)
+            .map_err(|e| HyprlandWmError(format!("parse: {}", e)))?;
+        Ok(monitors
+            .into_iter()
+            .find(|m| m.focused)
+            .map(|m| m.name))
     }
 
     fn active_window(&self) -> Result<Option<WindowInfo>, Self::Error> {

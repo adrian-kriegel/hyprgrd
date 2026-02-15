@@ -91,6 +91,10 @@ mod noop_wm {
             Ok(())
         }
 
+        fn active_monitor(&self) -> Result<Option<String>, NoopWmError> {
+            Ok(Some("DEBUG-1".into()))
+        }
+
         fn active_window(&self) -> Result<Option<WindowInfo>, NoopWmError> {
             Ok(None)
         }
@@ -134,8 +138,13 @@ fn run_daemon() {
     switcher.set_gesture_config(config.gestures.clone());
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
+    #[cfg(feature = "visualizer-gtk")]
+    let cmd_tx_for_visualizer = cmd_tx.clone();
     spawn_command_sources(cmd_tx);
 
+    #[cfg(feature = "visualizer-gtk")]
+    start_event_loop(switcher, cmd_rx, cmd_tx_for_visualizer, config);
+    #[cfg(not(feature = "visualizer-gtk"))]
     start_event_loop(switcher, cmd_rx, config);
 }
 
@@ -158,9 +167,10 @@ fn run_debug_visualizer() {
         switcher.set_gesture_config(config.gestures.clone());
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
+        let cmd_tx_for_visualizer = cmd_tx.clone();
         spawn_command_sources(cmd_tx);
 
-        start_event_loop(switcher, cmd_rx, config);
+        start_event_loop(switcher, cmd_rx, cmd_tx_for_visualizer, config);
     }
 }
 
@@ -168,13 +178,30 @@ fn run_debug_visualizer() {
 
 #[cfg(feature = "visualizer-gtk")]
 fn start_event_loop<W: WindowManager + 'static>(
-    switcher: GridSwitcher<W>,
+    mut switcher: GridSwitcher<W>,
     cmd_rx: mpsc::Receiver<Command>,
+    cmd_tx_for_visualizer: mpsc::Sender<Command>,
     config: Config,
 ) {
+    let (vis_tx, vis_rx) = mpsc::channel();
+    switcher.set_visualizer(vis_tx);
+
+    let initial_state = switcher.visualizer_state(0.0, 0.0);
+
+    use std::cell::RefCell;
+    let switcher = std::rc::Rc::new(RefCell::new(switcher));
+    let dispatch = Box::new(move |cmd: Command| {
+        if let Err(e) = switcher.borrow_mut().handle(cmd) {
+            error!(target: "hyprgrd::switcher", "command error: {}", e);
+        }
+    });
+
     hyprgrd::visualizer::gtk::run_main_loop(
-        switcher,
         cmd_rx,
+        vis_rx,
+        cmd_tx_for_visualizer,
+        dispatch,
+        initial_state,
         Some(css_path()),
         config.visualizer,
     );

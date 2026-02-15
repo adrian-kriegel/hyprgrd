@@ -8,7 +8,6 @@
 //!     └ gtk4::Overlay
 //!         ├ .grid              (GtkGrid, main child)
 //!         │   ├ .grid-cell     (dim base colour)
-//!         │   ├ .grid-cell.visited
 //!         │   └ …
 //!         └ .grid-cursor       (overlay child, animated position)
 //! ```
@@ -22,21 +21,21 @@
 //! | `.grid`                | The `GtkGrid`                                  |
 //! | `.grid-cell`           | Every cell                                     |
 //! | `.grid-cell.active`    | Cell under the cursor (for user CSS hooks)     |
-//! | `.grid-cell.visited`   | Previously visited cells                       |
 //! | `.grid-cursor`         | The sliding selector highlight                 |
 //!
 //! The `.grid-cursor` appearance is fully CSS-configurable.  Movement is
 //! code-driven; timing is controlled by [`VisualizerConfig`].
 
-use crate::command::Command;
+use crate::command::{Command, MonitorInfo};
 use crate::config::VisualizerConfig;
-use crate::switcher::GridSwitcher;
-use crate::traits::{VisualizerEvent, VisualizerState, WindowManager};
+use crate::traits::{VisualizerEvent, VisualizerState};
 use gtk4::prelude::*;
 use gtk4::{gdk, glib};
 use gtk4_layer_shell::LayerShell;
 use log::{debug, error, info, warn};
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -74,13 +73,17 @@ window.background {
     transition: background-color 150ms ease-in-out;
 }
 
-.grid-cell.visited {
-    background-color: rgba(255, 255, 255, 0.18);
-}
-
 .grid-cursor {
     background-color: rgba(255, 255, 255, 0.9);
     border-radius: 6px;
+}
+
+.grid-overlay.mode-manual {
+    cursor: pointer;
+}
+
+.grid-overlay.mode-manual .grid-cell {
+    cursor: pointer;
 }
 "#;
 
@@ -108,6 +111,13 @@ enum Visibility {
     Fading(Instant),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShownKind {
+    Hidden,
+    ManuallyShown,
+    AutomaticallyShown,
+}
+
 //  Cursor animation 
 
 struct CursorAnim {
@@ -132,10 +142,15 @@ struct OverlayGrid {
     anim: Option<CursorAnim>,
     cursor_anim_dur: Duration,
     initialised: bool,
+    on_cell_click: Option<Rc<dyn Fn(usize, usize)>>,
 }
 
 impl OverlayGrid {
-    fn new(container: &gtk4::Box, config: &VisualizerConfig) -> Self {
+    fn new(
+        container: &gtk4::Box,
+        config: &VisualizerConfig,
+        on_cell_click: Option<Rc<dyn Fn(usize, usize)>>,
+    ) -> Self {
         let overlay = gtk4::Overlay::new();
 
         let grid_widget = gtk4::Grid::new();
@@ -166,6 +181,7 @@ impl OverlayGrid {
             anim: None,
             cursor_anim_dur: Duration::from_millis(config.cursor_animation_ms),
             initialised: false,
+            on_cell_click,
         }
     }
 
@@ -262,6 +278,17 @@ impl OverlayGrid {
                 cell.set_size_request(CELL_SIZE, CELL_SIZE);
                 self.grid_widget
                     .attach(&cell, col as i32, row as i32, 1, 1);
+
+                if let Some(ref on_click) = self.on_cell_click {
+                    let gesture = gtk4::GestureClick::new();
+                    gesture.set_button(1); // left mouse button
+                    let cb: Rc<dyn Fn(usize, usize)> = Rc::clone(on_click);
+                    gesture.connect_released(move |_, _, _, _| {
+                        cb(col, row);
+                    });
+                    cell.add_controller(gesture);
+                }
+
                 self.cells.push(cell);
             }
         }
@@ -272,29 +299,57 @@ impl OverlayGrid {
             for col in 0..self.cols {
                 let cell = &self.cells[row * self.cols + col];
                 let is_active = col == state.col && row == state.row;
-                let is_visited = !is_active && state.visited.contains(&(col, row));
 
                 if is_active {
                     cell.add_css_class("active");
                 } else {
                     cell.remove_css_class("active");
                 }
-                if is_visited {
-                    cell.add_css_class("visited");
-                } else {
-                    cell.remove_css_class("visited");
-                }
             }
         }
     }
 }
 
+/// Resolve the GDK monitor for the given active monitor name and WM monitor list.
+/// Matches by position (x, y) since monitor names from the WM (e.g., "DP-1")
+/// may not match GDK monitor identifiers.
+fn get_active_monitor(
+    active_monitor_name: Option<&str>,
+    monitors: &[MonitorInfo],
+) -> Option<gdk::Monitor> {
+    let active_name = active_monitor_name?;
+    let display = gdk::Display::default()
+        .expect("GDK display must be available for visualizer");
+
+    let active_monitor_info = monitors.iter().find(|m| m.name == active_name)?;
+    display
+        .monitors()
+        .iter::<gdk::Monitor>()
+        .find_map(|res| {
+            let m = res.expect("monitor list mutated during iteration while selecting monitor");
+            let geometry = m.geometry();
+            if geometry.x() == active_monitor_info.x && geometry.y() == active_monitor_info.y {
+                Some(m)
+            } else {
+                None
+            }
+        })
+}
+
 //  Public API 
 
 /// Run the GTK4 main loop on the **current** (main) thread.
-pub fn run_main_loop<W: WindowManager + 'static>(
-    mut switcher: GridSwitcher<W>,
+///
+/// The visualizer is decoupled from the switcher: it receives events via
+/// `vis_rx`, dispatches commands (e.g. from cell clicks) via `cmd_tx`, and
+/// forwards incoming commands via `dispatch`. It never holds a reference
+/// to the switcher.
+pub fn run_main_loop(
     cmd_rx: mpsc::Receiver<Command>,
+    vis_rx: mpsc::Receiver<VisualizerEvent>,
+    cmd_tx: mpsc::Sender<Command>,
+    dispatch: Box<dyn FnMut(Command)>,
+    initial_state: VisualizerState,
     css_path: Option<PathBuf>,
     vis_config: VisualizerConfig,
 ) {
@@ -321,11 +376,26 @@ pub fn run_main_loop<W: WindowManager + 'static>(
     container.set_valign(gtk4::Align::Center);
     window.set_child(Some(&container));
 
-    //  Persistent overlay grid 
-    let mut overlay_grid = OverlayGrid::new(&container, &vis_config);
+    let shown_kind = Rc::new(Cell::new(ShownKind::Hidden));
 
-    //  Initial render + present (maps the Wayland surface) 
-    let initial_state = VisualizerState::from_grid(switcher.grid(), 0.0, 0.0);
+    let on_cell_click: Rc<dyn Fn(usize, usize)> = {
+        let cmd_tx = cmd_tx.clone();
+        let shown_kind = Rc::clone(&shown_kind);
+        Rc::new(move |col, row| {
+            if shown_kind.get() != ShownKind::ManuallyShown {
+                return;
+            }
+            let cmd = Command::SwitchTo { x: col, y: row };
+            if let Err(e) = cmd_tx.send(cmd) {
+                error!(target: "hyprgrd::visualizer", "failed to dispatch cell click: {}", e);
+            }
+        })
+    };
+
+    //  Persistent overlay grid
+    let mut overlay_grid = OverlayGrid::new(&container, &vis_config, Some(on_cell_click));
+
+    //  Initial render + present (maps the Wayland surface)
     overlay_grid.update(&initial_state);
     window.present();
     window.set_visible(false);
@@ -333,10 +403,6 @@ pub fn run_main_loop<W: WindowManager + 'static>(
         "overlay mapped (hidden): {}x{} at ({}, {})",
         initial_state.cols, initial_state.rows, initial_state.col, initial_state.row
     );
-
-    //  Visualizer channel 
-    let (vis_tx, vis_rx) = mpsc::channel::<VisualizerEvent>();
-    switcher.set_visualizer(vis_tx);
 
     info!(
         "visualizer ready (cursor {}ms, linger {}ms, fade {}ms, CSS: {})",
@@ -349,20 +415,21 @@ pub fn run_main_loop<W: WindowManager + 'static>(
             .unwrap_or_else(|| "<built-in>".into()),
     );
 
-    //  Visibility state machine 
+    //  Visibility state machine
     let mut visibility = Visibility::Hidden;
 
-    //  Main event loop (~60 fps) 
+    //  Main event loop (~60 fps)
+    let dispatch_cell = Rc::new(RefCell::new(dispatch));
+    let shown_kind_for_loop = Rc::clone(&shown_kind);
+    let dispatch_for_loop = Rc::clone(&dispatch_cell);
     glib::timeout_add_local(Duration::from_millis(16), move || {
-        // 1. Drain commands.
+        // 1. Drain commands and forward to the switcher via the dispatch callback.
         let mut disconnected = false;
         loop {
             match cmd_rx.try_recv() {
                 Ok(cmd) => {
                     debug!("command: {:?}", cmd);
-                    if let Err(e) = switcher.handle(cmd) {
-                        error!("command error: {}", e);
-                    }
+                    dispatch_for_loop.borrow_mut()(cmd);
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -375,22 +442,108 @@ pub fn run_main_loop<W: WindowManager + 'static>(
         // 2. Drain visualizer events.
         while let Ok(event) = vis_rx.try_recv() {
             match event {
-                VisualizerEvent::Show(state) => {
+                VisualizerEvent::ShowAuto(payload) => {
+                    let state = &payload.state;
                     debug!(
-                        "SHOW {}x{} pos=({},{}) off=({:.2},{:.2})",
+                        "SHOW_AUTO {}x{} pos=({},{}) off=({:.2},{:.2})",
                         state.cols, state.rows, state.col, state.row,
                         state.offset_x, state.offset_y
                     );
-                    overlay_grid.update(&state);
-                    // Cancel any linger / fade and become fully visible.
+
+                    overlay_grid.update(state);
                     container.set_opacity(1.0);
+                    container.remove_css_class("mode-manual");
+                    container.add_css_class("mode-auto");
+                    window.set_cursor_from_name(None::<&str>);
+
+                    if let Some(monitor) = get_active_monitor(
+                        payload.active_monitor_name.as_deref(),
+                        &payload.monitors,
+                    ) {
+                        window.set_monitor(&monitor);
+                        let geometry = monitor.geometry();
+                        info!(
+                            "visualizer set to monitor at ({}, {})",
+                            geometry.x(), geometry.y()
+                        );
+                    }
+
                     window.set_visible(true);
                     window.present();
                     visibility = Visibility::Visible;
+                    shown_kind_for_loop.set(ShownKind::AutomaticallyShown);
+                }
+                VisualizerEvent::ToggleManual(payload) => {
+                    let state = &payload.state;
+                    match shown_kind_for_loop.get() {
+                        ShownKind::ManuallyShown => {
+                            debug!("TOGGLE_MANUAL → hide (instant)");
+                            window.set_visible(false);
+                            container.set_opacity(1.0);
+                            container.remove_css_class("mode-auto");
+                            container.remove_css_class("mode-manual");
+                            window.set_cursor_from_name(None::<&str>);
+                            visibility = Visibility::Hidden;
+                            shown_kind_for_loop.set(ShownKind::Hidden);
+                        }
+                        ShownKind::Hidden | ShownKind::AutomaticallyShown => {
+                            debug!(
+                                "TOGGLE_MANUAL → show {}x{} pos=({},{})",
+                                state.cols, state.rows, state.col, state.row
+                            );
+                            overlay_grid.update(state);
+                            container.set_opacity(1.0);
+                            container.remove_css_class("mode-auto");
+                            container.add_css_class("mode-manual");
+                            window.set_cursor_from_name(Some("pointer"));
+
+                            if let Some(monitor) = get_active_monitor(
+                                payload.active_monitor_name.as_deref(),
+                                &payload.monitors,
+                            ) {
+                                window.set_monitor(&monitor);
+                                let geometry = monitor.geometry();
+                                info!(
+                                    "visualizer set to monitor at ({}, {})",
+                                    geometry.x(), geometry.y()
+                                );
+                            }
+
+                            window.set_visible(true);
+                            window.present();
+                            visibility = Visibility::Visible;
+                            shown_kind_for_loop.set(ShownKind::ManuallyShown);
+                        }
+                    }
                 }
                 VisualizerEvent::Hide => {
-                    debug!("HIDE (linger {}ms + fade {}ms)", linger_dur.as_millis(), fade_dur.as_millis());
-                    visibility = Visibility::Lingering(Instant::now());
+                    match shown_kind_for_loop.get() {
+                        ShownKind::Hidden => {
+                            // Nothing to do.
+                            debug!("HIDE (no-op, already hidden)");
+                        }
+                        ShownKind::ManuallyShown => {
+                            // Manual overlay: hide instantly.
+                            debug!("HIDE (manual, instant)");
+                            window.set_visible(false);
+                            container.set_opacity(1.0);
+                            container.remove_css_class("mode-auto");
+                            container.remove_css_class("mode-manual");
+                            window.set_cursor_from_name(None::<&str>);
+                            visibility = Visibility::Hidden;
+                            shown_kind_for_loop.set(ShownKind::Hidden);
+                        }
+                        ShownKind::AutomaticallyShown => {
+                            // Automatic overlay: start linger + fade-out.
+                            debug!(
+                                "HIDE (automatic, linger {}ms + fade {}ms)",
+                                linger_dur.as_millis(),
+                                fade_dur.as_millis()
+                            );
+                            visibility = Visibility::Lingering(Instant::now());
+                            // We'll mark Hidden once the fade finishes.
+                        }
+                    }
                 }
             }
         }
@@ -420,6 +573,7 @@ pub fn run_main_loop<W: WindowManager + 'static>(
                     window.set_visible(false);
                     container.set_opacity(1.0); // reset for next show
                     visibility = Visibility::Hidden;
+                    shown_kind_for_loop.set(ShownKind::Hidden);
                 }
             }
         }

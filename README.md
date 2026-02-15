@@ -2,6 +2,16 @@
 
 A grid-based workspace switcher for Hyprland.
 
+# TODO
+
+  1. Touchpad gestures seem to be broken. I think the issue is that hyprgrd still assumes gestures.workspace_swipe exists which is no longer supported in favor of newer gesture configs. 
+  2. When switching workspaces, the mouse cursor will sometimes focus a different display. It should still focus the display it focused before switching. 
+  3. The "movego" command does not trigger the visualizer but should.
+  4. The "movego" command will sometimes move the focused window to a different monitor.
+  5. "movego" seems to be pretty unstable in general. 
+  6. Add some way of attaching to the stdout of the daemon process when run through hyprland exec-once
+  7. The visualize does not show on the focused display. This should be configurable in the config "show on focused display" and "show on all displays" 
+
 ## Sending commands
 
 Connect to the Unix socket and write newline-delimited JSON. Each line is one command.
@@ -21,6 +31,7 @@ Connect to the Unix socket and write newline-delimited JSON. Each line is one co
 | Swipe begin | `{"SwipeBegin":{"fingers":3}}` | Start a raw touchpad swipe (sent by plugin) |
 | Swipe update | `{"SwipeUpdate":{"fingers":3,"dx":10.5,"dy":-2.3}}` | Incremental finger delta in pixels (sent by plugin) |
 | Swipe end | `"SwipeEnd"` | Fingers lifted — commit or cancel based on threshold |
+| Toggle visualizer | `"ToggleVisualizer"` | Toggle a persistent overlay showing the current grid state without moving workspaces |
 
 ### Examples with socat
 
@@ -74,6 +85,9 @@ bind = SUPER ALT, 2, hyprgrd:movetomonitorindex, 1
 bind = SUPER, 1, hyprgrd:switch, 0 0
 bind = SUPER, 2, hyprgrd:switch, 1 0
 bind = SUPER, 3, hyprgrd:switch, 2 0
+
+# Toggle persistent visualizer overlay (for example, with Escape)
+bind = , escape, hyprgrd:togglevis
 ```
 
 The dispatchers can also be invoked from the command line:
@@ -161,8 +175,6 @@ bind = SUPER, down,  exec, echo '{"Go":"Down"}'  | socat - UNIX-CONNECT:$XDG_RUN
 ```
 
 ## Touchpad gestures
-
-TODO: Touchpad gestures seem to be broken.
 
 Touchpad swipe gestures are forwarded by the **hyprgrd Hyprland plugin**. The plugin hooks into Hyprland's swipe pipeline, forwards the raw events to the daemon, and **cancels** the default workspace-swipe handling so Hyprland doesn't fight over the gesture.
 
@@ -254,7 +266,6 @@ window                         transparent layer-shell surface
     └ Overlay
         ├ .grid              GtkGrid holding all cells
         │   ├ .grid-cell             base (unvisited) cell
-        │   ├ .grid-cell.visited     previously visited cell
         │   └ .grid-cell.active      cell under the cursor
         └ .grid-cursor       the bright sliding selector
 ```
@@ -265,9 +276,10 @@ window                         transparent layer-shell surface
 |---|---|
 | `window` | The overlay window — keep `background-color: transparent` |
 | `.grid-overlay` | The dark rounded container around the grid |
+| `.grid-overlay.mode-auto` | Overlay while it is shown automatically for navigation / gestures (non-interactive by default) |
+| `.grid-overlay.mode-manual` | Overlay while it is manually pinned open; grid cells are clickable to switch workspaces |
 | `.grid` | The `GtkGrid` widget itself |
 | `.grid-cell` | Every cell (base dim colour) |
-| `.grid-cell.visited` | Cells that have been navigated to at least once |
 | `.grid-cell.active` | The cell directly under the cursor (CSS hook for advanced styling) |
 | `.grid-cursor` | The sliding highlight — this is the primary active indicator |
 
@@ -295,13 +307,14 @@ window.background {
     transition: background-color 150ms ease-in-out;
 }
 
-.grid-cell.visited {
-    background-color: rgba(255, 255, 255, 0.18);
-}
-
 .grid-cursor {
     background-color: rgba(255, 255, 255, 0.9);
     border-radius: 6px;
+}
+
+.grid-overlay.mode-manual,
+.grid-overlay.mode-manual .grid-cell {
+    cursor: pointer; /* indicate that cells are clickable when the visualizer is pinned open */
 }
 ```
 
@@ -328,10 +341,6 @@ window.background {
     background-color: rgba(205, 214, 244, 0.06);
 }
 
-.grid-cell.visited {
-    background-color: rgba(205, 214, 244, 0.15);
-}
-
 .grid-cursor {
     background-color: rgba(137, 180, 250, 0.9);
     border-radius: 8px;
@@ -349,7 +358,7 @@ window.background {
 }
 ```
 
-> **Note:** The cursor slide, linger, and fade-out timings are controlled by `config.json`, not by CSS. The CSS `transition` property on `.grid-cell` only affects the background fade when cells gain or lose the `.visited` class.
+> **Note:** The cursor slide, linger, and fade-out timings are controlled by `config.json`, not by CSS. The CSS `transition` property on `.grid-cell` is not respected.
 
 ### Debug overlay
 
@@ -378,6 +387,7 @@ The `plugin/` directory contains a Hyprland C++ plugin that provides:
 | `hyprgrd:switch` | `<col> <row>` (0-indexed, space-separated) | `bind = SUPER, 1, hyprgrd:switch, 0 0` |
 | `hyprgrd:movetomonitor` | `left` / `right` / `up` / `down` | `bind = SUPER ALT, right, hyprgrd:movetomonitor, right` |
 | `hyprgrd:movetomonitorindex` | `<n>` (0-based monitor index) | `bind = SUPER ALT, 1, hyprgrd:movetomonitorindex, 0` |
+| `hyprgrd:togglevis` | *(no args)* | `bind = , escape, hyprgrd:togglevis` |
 
 
 ### Building the plugin

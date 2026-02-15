@@ -72,6 +72,15 @@ pub enum Command {
     /// sequence.
     CommitMove(Direction),
 
+    /// Toggle a persistent visualizer overlay for the **current** grid state.
+    ///
+    /// When turned on, the overlay is shown and kept visible while you
+    /// navigate; subsequent navigation commands update the cursor but do not
+    /// auto-hide the overlay.  Invoking the command again hides it.
+    ///
+    /// On the wire this is encoded as the JSON string `"ToggleVisualizer"`.
+    ToggleVisualizer,
+
     //  Raw touchpad swipe events (forwarded by the Hyprland plugin) 
 
     /// A multi-finger swipe has started.

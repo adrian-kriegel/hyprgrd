@@ -49,10 +49,6 @@ window.background {
     transition: background-color 150ms ease-in-out;
 }
 
-.grid-cell.visited {
-    background-color: rgba(255, 255, 255, 0.18);
-}
-
 .grid-cursor {
     background-color: rgba(255, 255, 255, 0.9);
     border-radius: 6px;

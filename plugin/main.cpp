@@ -8,6 +8,7 @@
 //   hyprgrd:switch              <col> <row>      — jump to an absolute grid position
 //   hyprgrd:movetomonitor       <direction>      — move focused window to monitor in direction
 //   hyprgrd:movetomonitorindex  <n>              — move focused window to monitor n (0-based)
+//   hyprgrd:togglevis                            — toggle persistent visualizer overlay
 //
 // ## Swipe gesture forwarding
 //
@@ -197,6 +198,23 @@ static SDispatchResult dispatchMoveToMonitorIndex(std::string arg) {
     return ok ? SDispatchResult{} : SDispatchResult{.success = false, .error = "failed to send command"};
 }
 
+/// hyprgrd:togglevis
+///
+/// Toggle a persistent overlay that shows the current grid state without
+/// moving workspaces.  This sends the JSON string `"ToggleVisualizer"` to
+/// the daemon; the first call shows the overlay and pins it, the second
+/// call hides it again.
+///
+/// Note: This dispatcher takes no arguments. Hyprland will pass an empty
+/// string when called without arguments, which we ignore.
+static SDispatchResult dispatchToggleVis(std::string arg) {
+    // Ignore any arguments (should be empty when called via keybind)
+    (void)arg;
+    const std::string json = "\"ToggleVisualizer\"";
+    bool ok = sendCommand(json);
+    return ok ? SDispatchResult{} : SDispatchResult{.success = false, .error = "failed to send command"};
+}
+
 //  Plugin entry points 
 
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
@@ -224,11 +242,12 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     //  Dispatchers (keyboard binds) 
 
-    HyprlandAPI::addDispatcherV2(PHANDLE, "hyprgrd:go",                  dispatchGo);
+    HyprlandAPI::addDispatcherV2(PHANDLE, "hyprgrd:go",                 dispatchGo);
     HyprlandAPI::addDispatcherV2(PHANDLE, "hyprgrd:movego",             dispatchMoveGo);
     HyprlandAPI::addDispatcherV2(PHANDLE, "hyprgrd:switch",             dispatchSwitch);
     HyprlandAPI::addDispatcherV2(PHANDLE, "hyprgrd:movetomonitor",      dispatchMoveToMonitor);
     HyprlandAPI::addDispatcherV2(PHANDLE, "hyprgrd:movetomonitorindex", dispatchMoveToMonitorIndex);
+    HyprlandAPI::addDispatcherV2(PHANDLE, "hyprgrd:togglevis",          dispatchToggleVis);
 
     //  Swipe gesture hooks 
     // Hook into Hyprland's swipe pipeline, forward events to the
