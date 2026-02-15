@@ -48,67 +48,49 @@ struct CommandResult {
     std::string value; ///< JSON payload if `ok`, error message otherwise.
 };
 
-/// Validate a direction string and return `true` when it is one of the four
-/// accepted values (after trim + capitalize).
-inline bool isValidDirection(const std::string& dir) {
-    return dir == "Left" || dir == "Right" || dir == "Up" || dir == "Down";
+/// Escape a string for use as a JSON string value (backslash and quote).
+inline std::string escapeJsonString(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        if (c == '\\') out += "\\\\";
+        else if (c == '"') out += "\\\"";
+        else out += static_cast<char>(c);
+    }
+    return out;
 }
 
-/// Build the JSON for `hyprgrd:go <direction>`.
-///
-/// Produces: `{"Go":"Right"}`  (etc.)
+/// Build the JSON for `hyprgrd:go <direction>`. Forwards the raw argument;
+/// daemon parses and validates.
 inline CommandResult buildGoJson(const std::string& arg) {
-    std::string dir = capitalize(trim(arg));
-    if (!isValidDirection(dir))
-        return {false, "invalid direction: " + arg};
-    return {true, "{\"Go\":\"" + dir + "\"}"};
+    std::string s = escapeJsonString(trim(arg));
+    return {true, "{\"Go\":\"" + s + "\"}"};
 }
 
-/// Build the JSON for `hyprgrd:movego <direction>`.
-///
-/// Produces: `{"MoveWindowAndGo":"Right"}`  (etc.)
+/// Build the JSON for `hyprgrd:movego <direction>`. Forwards the raw argument.
 inline CommandResult buildMoveGoJson(const std::string& arg) {
-    std::string dir = capitalize(trim(arg));
-    if (!isValidDirection(dir))
-        return {false, "invalid direction: " + arg};
-    return {true, "{\"MoveWindowAndGo\":\"" + dir + "\"}"};
+    std::string s = escapeJsonString(trim(arg));
+    return {true, "{\"MoveWindowAndGo\":\"" + s + "\"}"};
 }
 
-/// Build the JSON for `hyprgrd:switch <col> <row>`.
-///
-/// Produces: `{"SwitchTo":{"x":2,"y":1}}`
+/// Build the JSON for `hyprgrd:switch <col> <row>`. Forwards the raw argument
+/// (e.g. "0 0"); daemon parses.
 inline CommandResult buildSwitchJson(const std::string& arg) {
-    std::istringstream iss(trim(arg));
-    int col = 0, row = 0;
-    if (!(iss >> col >> row) || col < 0 || row < 0)
-        return {false, "expected: <col> <row> (non-negative integers)"};
-    return {true, "{\"SwitchTo\":{\"x\":" + std::to_string(col) +
-                   ",\"y\":" + std::to_string(row) + "}}"};
+    std::string s = escapeJsonString(trim(arg));
+    return {true, "{\"SwitchTo\":\"" + s + "\"}"};
 }
 
-/// Build the JSON for `hyprgrd:movetomonitor <direction>`.
-///
-/// Produces: `{"MoveWindowToMonitor":"Right"}`  (etc.)
+/// Build the JSON for `hyprgrd:movetomonitor <direction>`. Forwards the raw argument.
 inline CommandResult buildMoveToMonitorJson(const std::string& arg) {
-    std::string dir = capitalize(trim(arg));
-    if (!isValidDirection(dir))
-        return {false, "invalid direction: " + arg};
-    return {true, "{\"MoveWindowToMonitor\":\"" + dir + "\"}"};
+    std::string s = escapeJsonString(trim(arg));
+    return {true, "{\"MoveWindowToMonitor\":\"" + s + "\"}"};
 }
 
-/// Build the JSON for `hyprgrd:movetomonitorindex <n>`.
-///
-/// Produces: `{"MoveWindowToMonitorIndex":2}`
+/// Build the JSON for `hyprgrd:movetomonitorindex <n>`. Forwards the raw argument;
+/// daemon parses.
 inline CommandResult buildMoveToMonitorIndexJson(const std::string& arg) {
-    std::istringstream iss(trim(arg));
-    int idx = -1;
-    if (!(iss >> idx) || idx < 0)
-        return {false, "expected: <n> (non-negative integer)"};
-    // Make sure there's nothing extra after the number.
-    std::string leftover;
-    if (iss >> leftover)
-        return {false, "expected a single non-negative integer"};
-    return {true, "{\"MoveWindowToMonitorIndex\":" + std::to_string(idx) + "}"};
+    std::string s = escapeJsonString(trim(arg));
+    return {true, "{\"MoveWindowToMonitorIndex\":\"" + s + "\"}"};
 }
 
 //  Swipe event builders (sent by the swipe hooks) 

@@ -181,15 +181,16 @@ Touchpad swipe gestures are forwarded by the **hyprgrd Hyprland plugin**. The pl
 ### Setup
 
 1. Build and load the [plugin](#plugin).
-2. Enable Hyprland's swipe pipeline (the plugin needs it active to receive hooks):
+2. Enable Hyprland's gesture pipeline so swipe events are emitted (required for the plugin to receive hooks). **Hyprland 0.51+** uses the new `gesture = ...` syntax; the old `workspace_swipe = true` option was removed.
 
 ```conf
 gestures {
-  workspace_swipe = true
+  gesture = 3, horizontal, workspace
+  gesture = 4, horizontal, workspace
 }
 ```
 
-That's it — the plugin intercepts the events before Hyprland acts on them, so you won't see any of Hyprland's built-in workspace sliding animation.
+Use both 3- and 4-finger horizontal workspace gestures so that both “switch workspace” (3 fingers) and “move window and go” (4 fingers) work. The plugin intercepts the events before Hyprland acts on them, so you won't see Hyprland's built-in workspace sliding animation.
 
 ### Gesture behaviour
 
@@ -207,8 +208,10 @@ The sensitivity and commit threshold can be tuned in `~/.config/hyprgrd/config.j
   "gestures": {
     "sensitivity": 200.0,
     "commit_threshold": 0.3,
+    "commit_while_dragging_threshold": 0.8,
     "switch_fingers": 3,
-    "move_fingers": 4
+    "move_fingers": 4,
+    "natural_swiping": true
   }
 }
 ```
@@ -216,9 +219,11 @@ The sensitivity and commit threshold can be tuned in `~/.config/hyprgrd/config.j
 | Key | Default | Description |
 |---|---|---|
 | `sensitivity` | `200.0` | Pixels of finger travel per normalised unit (higher = less sensitive) |
-| `commit_threshold` | `0.3` | Normalised distance the gesture must exceed to commit the switch |
+| `commit_threshold` | `0.3` | Normalised distance the gesture must exceed on **release** to commit the switch |
+| `commit_while_dragging_threshold` | *(none)* | If set (0.0–1.0), commit as soon as the gesture reaches this fraction toward the next cell, without waiting for release (e.g. `0.8` = switch at 80% of the way) |
 | `switch_fingers` | `3` | Finger count for workspace switch gestures |
 | `move_fingers` | `4` | Finger count for move-window-and-switch gestures |
+| `natural_swiping` | `true` | Invert gesture direction (swipe right → grid moves left, like natural scroll) |
 
 ## Visualizer
 
@@ -240,8 +245,10 @@ Create `~/.config/hyprgrd/config.json` (or `$XDG_CONFIG_HOME/hyprgrd/config.json
   "gestures": {
     "sensitivity": 200.0,
     "commit_threshold": 0.3,
+    "commit_while_dragging_threshold": 0.8,
     "switch_fingers": 3,
-    "move_fingers": 4
+    "move_fingers": 4,
+    "natural_swiping": true
   }
 }
 ```

@@ -4,17 +4,26 @@
 //! [`Command`] describes every action the switcher can perform,
 //! and [`Direction`] / [`MonitorInfo`] / [`WindowInfo`] provide
 //! the supporting data types.
+//!
+//! The plugin forwards raw arguments; the daemon parses direction strings
+//! (e.g. "right", "up-left"), SwitchTo ("col row" or {"x", "y"}), and
+//! MoveWindowToMonitorIndex (number or string).
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as DeError;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 
-/// Cardinal direction for grid navigation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Direction for grid navigation (cardinal and diagonal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum Direction {
     Left,
     Right,
     Up,
     Down,
+    UpLeft,
+    UpRight,
+    DownLeft,
+    DownRight,
 }
 
 impl fmt::Display for Direction {
@@ -24,7 +33,127 @@ impl fmt::Display for Direction {
             Direction::Right => write!(f, "right"),
             Direction::Up => write!(f, "up"),
             Direction::Down => write!(f, "down"),
+            Direction::UpLeft => write!(f, "up-left"),
+            Direction::UpRight => write!(f, "up-right"),
+            Direction::DownLeft => write!(f, "down-left"),
+            Direction::DownRight => write!(f, "down-right"),
         }
+    }
+}
+
+/// Parse a direction string (case-insensitive; accepts "right", "up-left", "UpLeft", etc.).
+fn parse_direction(s: &str) -> Option<Direction> {
+    let normalized: String = s
+        .trim()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '_')
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    match normalized.as_str() {
+        "left" => Some(Direction::Left),
+        "right" => Some(Direction::Right),
+        "up" => Some(Direction::Up),
+        "down" => Some(Direction::Down),
+        "upleft" | "up-left" => Some(Direction::UpLeft),
+        "upright" | "up-right" => Some(Direction::UpRight),
+        "downleft" | "down-left" => Some(Direction::DownLeft),
+        "downright" | "down-right" => Some(Direction::DownRight),
+        _ => None,
+    }
+}
+
+impl<'de> Deserialize<'de> for Direction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        parse_direction(&s).ok_or_else(|| DeError::custom(format!("invalid direction: {:?}", s)))
+    }
+}
+
+/// Wire format for SwitchTo: accepts `{"x":0,"y":0}` or `"col row"` (daemon parses).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SwitchToTarget {
+    pub x: usize,
+    pub y: usize,
+}
+
+impl<'de> Deserialize<'de> for SwitchToTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Visitor;
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = SwitchToTarget;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "object {{x, y}} or string \"col row\"")
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<SwitchToTarget, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut x = None;
+                let mut y = None;
+                while let Some(k) = map.next_key::<String>()? {
+                    match k.as_str() {
+                        "x" => x = Some(map.next_value()?),
+                        "y" => y = Some(map.next_value()?),
+                        _ => { let _: serde::de::IgnoredAny = map.next_value()?; }
+                    }
+                }
+                Ok(SwitchToTarget {
+                    x: x.ok_or_else(|| DeError::missing_field("x"))?,
+                    y: y.ok_or_else(|| DeError::missing_field("y"))?,
+                })
+            }
+            fn visit_str<E>(self, s: &str) -> Result<SwitchToTarget, E>
+            where
+                E: DeError,
+            {
+                let parts: Vec<&str> = s.trim().split_whitespace().collect();
+                if parts.len() != 2 {
+                    return Err(DeError::custom(format!("SwitchTo: expected \"col row\", got {:?}", s)));
+                }
+                let x: usize = parts[0].parse().map_err(|_| DeError::custom("SwitchTo: col must be a non-negative integer"))?;
+                let y: usize = parts[1].parse().map_err(|_| DeError::custom("SwitchTo: row must be a non-negative integer"))?;
+                Ok(SwitchToTarget { x, y })
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+/// Wire format for MoveWindowToMonitorIndex: accepts number or string (daemon parses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MonitorIndex(pub usize);
+
+impl<'de> Deserialize<'de> for MonitorIndex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Visitor;
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = MonitorIndex;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "non-negative integer or string")
+            }
+            fn visit_u64<E>(self, n: u64) -> Result<MonitorIndex, E> {
+                Ok(MonitorIndex(n as usize))
+            }
+            fn visit_str<E>(self, s: &str) -> Result<MonitorIndex, E>
+            where
+                E: DeError,
+            {
+                let n: usize = s.trim().parse().map_err(|_| DeError::custom("MoveWindowToMonitorIndex: expected non-negative integer"))?;
+                Ok(MonitorIndex(n))
+            }
+        }
+        deserializer.deserialize_any(V)
     }
 }
 
@@ -35,7 +164,7 @@ impl fmt::Display for Direction {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     /// Switch all monitors to workspace at absolute grid position `(x, y)`.
-    SwitchTo { x: usize, y: usize },
+    SwitchTo(SwitchToTarget),
 
     /// Move one cell in the given direction, creating the column/row if needed.
     Go(Direction),
@@ -55,7 +184,7 @@ pub enum Command {
     /// (0-based, in the order returned by the window manager).
     ///
     /// If the index is out of range, the command returns an error.
-    MoveWindowToMonitorIndex(usize),
+    MoveWindowToMonitorIndex(MonitorIndex),
 
     /// Gesture-driven partial move.
     ///
@@ -152,6 +281,10 @@ pub fn find_monitor_in_direction<'a>(
                 Direction::Left => mx < cx,
                 Direction::Down => my > cy,
                 Direction::Up => my < cy,
+                Direction::UpRight => mx > cx && my < cy,
+                Direction::UpLeft => mx < cx && my < cy,
+                Direction::DownRight => mx > cx && my > cy,
+                Direction::DownLeft => mx < cx && my > cy,
             }
         })
         .min_by(|a, b| {
@@ -176,13 +309,17 @@ mod tests {
         assert_eq!(Direction::Right.to_string(), "right");
         assert_eq!(Direction::Up.to_string(), "up");
         assert_eq!(Direction::Down.to_string(), "down");
+        assert_eq!(Direction::UpLeft.to_string(), "up-left");
+        assert_eq!(Direction::UpRight.to_string(), "up-right");
+        assert_eq!(Direction::DownLeft.to_string(), "down-left");
+        assert_eq!(Direction::DownRight.to_string(), "down-right");
     }
 
     #[test]
     fn command_equality() {
         assert_eq!(
-            Command::SwitchTo { x: 1, y: 2 },
-            Command::SwitchTo { x: 1, y: 2 }
+            Command::SwitchTo(SwitchToTarget { x: 1, y: 2 }),
+            Command::SwitchTo(SwitchToTarget { x: 1, y: 2 })
         );
         assert_ne!(Command::Go(Direction::Left), Command::Go(Direction::Right));
         assert_eq!(
@@ -206,12 +343,12 @@ mod tests {
     #[test]
     fn move_window_to_monitor_index_command_equality() {
         assert_eq!(
-            Command::MoveWindowToMonitorIndex(0),
-            Command::MoveWindowToMonitorIndex(0)
+            Command::MoveWindowToMonitorIndex(MonitorIndex(0)),
+            Command::MoveWindowToMonitorIndex(MonitorIndex(0))
         );
         assert_ne!(
-            Command::MoveWindowToMonitorIndex(0),
-            Command::MoveWindowToMonitorIndex(1)
+            Command::MoveWindowToMonitorIndex(MonitorIndex(0)),
+            Command::MoveWindowToMonitorIndex(MonitorIndex(1))
         );
     }
 

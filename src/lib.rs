@@ -18,6 +18,7 @@
 //! Concrete implementations live in [`hyprland`] (Hyprland IPC) and
 //! [`ipc`] (Unix-socket command listener).
 
+pub mod bezier;
 pub mod command;
 pub mod config;
 pub mod grid;

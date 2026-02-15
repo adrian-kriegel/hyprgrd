@@ -59,6 +59,30 @@ impl Grid {
                 }
             }
             Direction::Down => r += 1,
+            Direction::UpLeft => {
+                if c > 0 {
+                    c -= 1;
+                }
+                if r > 0 {
+                    r -= 1;
+                }
+            }
+            Direction::UpRight => {
+                c += 1;
+                if r > 0 {
+                    r -= 1;
+                }
+            }
+            Direction::DownLeft => {
+                if c > 0 {
+                    c -= 1;
+                }
+                r += 1;
+            }
+            Direction::DownRight => {
+                c += 1;
+                r += 1;
+            }
         }
         (c, r)
     }

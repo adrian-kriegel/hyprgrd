@@ -18,14 +18,12 @@
 // default Hyprland workspace-swipe handling.  This lets hyprgrd own the
 // gesture without Hyprland fighting over it.
 //
-// Requires `gestures:workspace_swipe = true` in hyprland.conf so the
-// compositor activates its swipe pipeline (the plugin then eats the events
-// before Hyprland acts on them).
-//
-// Example hyprland.conf:
+// Requires Hyprland 0.51+ gesture config so the compositor emits swipe
+// events (the plugin then eats them before Hyprland acts). Example:
 //
 //   gestures {
-//       workspace_swipe = true
+//       gesture = 3, horizontal, workspace
+//       gesture = 4, horizontal, workspace
 //   }
 //
 //   bind = SUPER, right, hyprgrd:go,     right
@@ -42,6 +40,7 @@
 #include "helpers.hpp"
 
 #include <hyprland/src/plugins/PluginAPI.hpp>
+#include <hyprland/src/devices/IPointer.hpp>
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -251,55 +250,53 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     //  Swipe gesture hooks 
     // Hook into Hyprland's swipe pipeline, forward events to the
-    // daemon, and cancel the default workspace-swipe behaviour.
+    // daemon, and cancel the default workspace-swipe behaviour only
+    // when we successfully take ownership (connected to daemon).
+    // Event payloads are IPointer::SSwipe*Event from Hyprland headers.
 
     g_swipeBeginCb = HyprlandAPI::registerCallbackDynamic(
         PHANDLE, "swipeBegin",
-        [](void* /*thisptr*/, SCallbackInfo& info, std::any /*data*/) {
-            // The IPointer::SSwipeBeginEvent is opaque here — Hyprland
-            // already validated the finger count against
-            // gestures:workspace_swipe_fingers, so we trust it.
-            // Default finger count is 3; the actual count is not
-            // exposed to the hook, so we use the configured value.
-            // TODO: extract finger count from `data` if the Hyprland
-            // API exposes it in the future.
-            g_swipeFingers = 3;
+        [](void* /*thisptr*/, SCallbackInfo& info, std::any data) {
+            uint32_t fingers = 3;
+            if (auto* ev = std::any_cast<IPointer::SSwipeBeginEvent>(&data))
+                fingers = ev->fingers;
 
             if (swipeConnect()) {
+                g_swipeFingers = fingers;
                 swipeSend(buildSwipeBeginJson(g_swipeFingers));
+                info.cancelled = true;
+            } else {
+                info.cancelled = false;
             }
-            info.cancelled = true;
         });
 
     g_swipeUpdateCb = HyprlandAPI::registerCallbackDynamic(
         PHANDLE, "swipeUpdate",
         [](void* /*thisptr*/, SCallbackInfo& info, std::any data) {
-            if (g_swipeFd < 0)
+            if (g_swipeFd < 0) {
+                info.cancelled = false;
                 return;
-            // data is IPointer::SSwipeUpdateEvent which has a `delta`
-            // member (Vector2D).  If we can extract it, great; otherwise
-            // we fall back to the Hyprland-global gesture delta.
-            // NOTE: std::any_cast may throw if the type doesn't match
-            // your Hyprland version.  In that case adjust the cast or
-            // use a version-specific struct.
-            try {
-                struct SSwipeUpdateEvent { uint32_t fingers; double dx, dy; };
-                auto e = std::any_cast<SSwipeUpdateEvent>(data);
-                swipeSend(buildSwipeUpdateJson(e.fingers, e.dx, e.dy));
-            } catch (...) {
-                // Fallback: try raw pointer extraction.
-                // If this doesn't work either, the swipe will simply
-                // not produce intermediate updates.
             }
+            if (auto* ev = std::any_cast<IPointer::SSwipeUpdateEvent>(&data)) {
+                swipeSend(buildSwipeUpdateJson(ev->fingers, ev->delta.x, ev->delta.y));
+                info.cancelled = true;
+                return;
+            }
+            // Layout mismatch: still cancel so we don't hand gesture back to Hyprland mid-swipe.
+            swipeSend(buildSwipeUpdateJson(g_swipeFingers, 0.0, 0.0));
             info.cancelled = true;
         });
 
     g_swipeEndCb = HyprlandAPI::registerCallbackDynamic(
         PHANDLE, "swipeEnd",
         [](void* /*thisptr*/, SCallbackInfo& info, std::any /*data*/) {
-            swipeSend(buildSwipeEndJson());
-            swipeDisconnect();
-            info.cancelled = true;
+            if (g_swipeFd >= 0) {
+                swipeSend(buildSwipeEndJson());
+                swipeDisconnect();
+                info.cancelled = true;
+            } else {
+                info.cancelled = false;
+            }
         });
 
     return {"hyprgrd", "Grid workspace switcher dispatchers + gesture forwarding", "hyprgrd", "0.2.0"};

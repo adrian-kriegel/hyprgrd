@@ -4,9 +4,9 @@
 //! [`GridSwitcher`] owns the [`Grid`] and reacts to [`Command`]s by updating
 //! the grid state and issuing calls to the [`WindowManager`] trait.
 
-use crate::command::{find_monitor_in_direction, Command, Direction};
+use crate::command::{find_monitor_in_direction, Command, Direction, MonitorIndex, SwitchToTarget};
 use crate::grid::Grid;
-use crate::hyprland::gestures::{clamp_unit, dominant_direction, GestureConfig};
+use crate::hyprland::gestures::{dominant_direction, normalised_swipe_offset, GestureConfig};
 use crate::traits::{VisualizerEvent, VisualizerShowPayload, VisualizerState, WindowManager};
 use log::{debug, info, warn};
 use std::sync::mpsc;
@@ -148,15 +148,20 @@ impl<W: WindowManager> GridSwitcher<W> {
     /// retry or recovery strategy is left to the caller.
     pub fn handle(&mut self, cmd: Command) -> Result<(), SwitcherError> {
         match cmd {
-            Command::SwitchTo { x, y } => {
+            Command::SwitchTo(SwitchToTarget { x, y }) => {
                 info!("switch to ({}, {})", x, y);
+                let already_there = self.position() == (x, y);
                 self.grid.grow_to_contain(x, y);
                 for pos in &mut self.monitor_positions {
                     pos.col = x;
                     pos.row = y;
                 }
-                self.apply_current_workspace()?;
-                // Flash the visualizer so the user sees the new position.
+                if !already_there {
+                    if let Err(e) = self.apply_current_workspace() {
+                        warn!("switch failed (will still finalize visualizer): {}", e);
+                    }
+                }
+                // Always flash and hide the visualizer so the UI finalizes.
                 self.show_visualizer(0.0, 0.0);
                 self.hide_visualizer();
             }
@@ -236,7 +241,7 @@ impl<W: WindowManager> GridSwitcher<W> {
                 }
             }
 
-            Command::MoveWindowToMonitorIndex(idx) => {
+            Command::MoveWindowToMonitorIndex(MonitorIndex(idx)) => {
                 info!("move window to monitor index {}", idx);
                 let monitors = self
                     .wm
@@ -260,8 +265,9 @@ impl<W: WindowManager> GridSwitcher<W> {
             }
 
             Command::CancelMove => {
-                debug!("cancel move");
-                self.hide_visualizer();
+                debug!("cancel move — switch to current workspace");
+                let (col, row) = self.position();
+                return self.handle(Command::SwitchTo(SwitchToTarget { x: col, y: row }));
             }
 
             Command::CommitMove(dir) => {
@@ -290,75 +296,56 @@ impl<W: WindowManager> GridSwitcher<W> {
             }
 
             Command::SwipeUpdate { fingers: _, dx, dy } => {
-                if let Some(ref mut swipe) = self.active_swipe {
+                let state = if let Some(ref mut swipe) = self.active_swipe {
                     swipe.dx += dx;
                     swipe.dy += dy;
                     let cfg = &self.gesture_config;
-                    let norm_dx = clamp_unit(swipe.dx / cfg.sensitivity);
-                    let norm_dy = clamp_unit(swipe.dy / cfg.sensitivity);
+                    let (norm_dx, norm_dy) = normalised_swipe_offset(
+                        swipe.dx,
+                        swipe.dy,
+                        cfg.sensitivity,
+                        cfg.natural_swiping,
+                    );
+                    let fingers = swipe.fingers;
+                    let commit_while = cfg.commit_while_dragging_threshold.and_then(|t| {
+                        dominant_direction(norm_dx, norm_dy, t)
+                            .map(|dir| (dir, fingers == cfg.move_fingers))
+                    });
+                    Some((norm_dx, norm_dy, commit_while))
+                } else {
+                    None
+                };
+                if let Some((norm_dx, norm_dy, commit_while)) = state {
                     debug!("swipe update: dx={:.2} dy={:.2}", norm_dx, norm_dy);
                     self.show_visualizer(norm_dx, norm_dy);
+                    if let Some((dir, move_window)) = commit_while {
+                        if let Err(e) = self.execute_swipe_commit(dir, move_window) {
+                            warn!("swipe commit while dragging: {}", e);
+                        }
+                        self.active_swipe = None;
+                    }
                 }
             }
 
             Command::SwipeEnd => {
                 if let Some(swipe) = self.active_swipe.take() {
                     let cfg = &self.gesture_config;
-                    let norm_dx = clamp_unit(swipe.dx / cfg.sensitivity);
-                    let norm_dy = clamp_unit(swipe.dy / cfg.sensitivity);
+                    let (norm_dx, norm_dy) = normalised_swipe_offset(
+                        swipe.dx,
+                        swipe.dy,
+                        cfg.sensitivity,
+                        cfg.natural_swiping,
+                    );
 
                     match dominant_direction(norm_dx, norm_dy, cfg.commit_threshold) {
-                        Some(dir) if swipe.fingers == cfg.move_fingers => {
-                            info!("swipe commit: move window and go {}", dir);
-                            let (col, row) = self.position();
-                            let (target_col, target_row) =
-                                Grid::get_abs_from(dir, col, row);
-
-                            let active_monitor = self
-                                .wm
-                                .active_monitor()
-                                .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
-
-                            let active = active_monitor.ok_or_else(|| {
-                                SwitcherError::WindowManager("no active monitor".to_string())
-                            })?;
-
-                            let (active_index, _) = self
-                                .monitor_positions
-                                .iter()
-                                .enumerate()
-                                .find(|(_, p)| p.name == active)
-                                .ok_or_else(|| {
-                                    SwitcherError::WindowManager(format!(
-                                        "active monitor {} has no grid mapping",
-                                        active
-                                    ))
-                                })?;
-
-                            let ws_id = Self::compute_workspace_id(
-                                target_col,
-                                target_row,
-                                active_index,
-                                self.monitor_positions.len(),
-                            );
-
-                            self.wm
-                                .move_window_to_workspace(ws_id)
-                                .map_err(|e| {
-                                    SwitcherError::WindowManager(e.to_string())
-                                })?;
-
-                            // Step 3: Execute the same logic as the `Go` command.
-                            // This updates the grid, switches workspaces, and shows the visualizer.
-                            self.go(dir)?;
-                        }
                         Some(dir) => {
-                            info!("swipe commit: go {}", dir);
-                            self.go(dir)?;
+                            let move_window = swipe.fingers == cfg.move_fingers;
+                            self.execute_swipe_commit(dir, move_window)?;
                         }
                         None => {
-                            debug!("swipe cancel (below threshold)");
-                            self.hide_visualizer();
+                            debug!("swipe cancel (below threshold) — switch to current workspace");
+                            let (col, row) = self.position();
+                            self.handle(Command::SwitchTo(SwitchToTarget { x: col, y: row }))?;
                         }
                     }
                 }
@@ -407,10 +394,22 @@ impl<W: WindowManager> GridSwitcher<W> {
 
     /// Build a `VisualizerState` from the current grid and position (for tests
     /// and visualizer integration).
+    ///
+    /// When gesture offsets are present, `target_cell` is set only once the
+    /// offset reaches the commit threshold (same as "release to switch").
     pub fn visualizer_state(&self, offset_x: f64, offset_y: f64) -> VisualizerState {
         let (cols, rows) = self.grid.dimensions();
         let (col, row) = self.position();
-        VisualizerState::new(cols, rows, col, row, offset_x, offset_y)
+        let target_cell = dominant_direction(
+            offset_x,
+            offset_y,
+            self.gesture_config.commit_threshold,
+        )
+        .map(|dir| Grid::get_abs_from(dir, col, row));
+        VisualizerState {
+            target_cell,
+            ..VisualizerState::new(cols, rows, col, row, offset_x, offset_y)
+        }
     }
 
     /// Request that the visualizer be hidden.
@@ -461,6 +460,57 @@ impl<W: WindowManager> GridSwitcher<W> {
                 .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
         }
 
+        Ok(())
+    }
+
+    /// Execute a swipe commit in the given direction (plain go or move window and go).
+    fn execute_swipe_commit(
+        &mut self,
+        dir: Direction,
+        move_window: bool,
+    ) -> Result<(), SwitcherError> {
+        if move_window {
+            info!("swipe commit: move window and go {}", dir);
+            let (col, row) = self.position();
+            let (target_col, target_row) = Grid::get_abs_from(dir, col, row);
+
+            let active_monitor = self
+                .wm
+                .active_monitor()
+                .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
+
+            let active = active_monitor.ok_or_else(|| {
+                SwitcherError::WindowManager("no active monitor".to_string())
+            })?;
+
+            let (active_index, _) = self
+                .monitor_positions
+                .iter()
+                .enumerate()
+                .find(|(_, p)| p.name == active)
+                .ok_or_else(|| {
+                    SwitcherError::WindowManager(format!(
+                        "active monitor {} has no grid mapping",
+                        active
+                    ))
+                })?;
+
+            let ws_id = Self::compute_workspace_id(
+                target_col,
+                target_row,
+                active_index,
+                self.monitor_positions.len(),
+            );
+
+            self.wm
+                .move_window_to_workspace(ws_id)
+                .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
+
+            self.go(dir)?;
+        } else {
+            info!("swipe commit: go {}", dir);
+            self.go(dir)?;
+        }
         Ok(())
     }
 
@@ -810,7 +860,7 @@ mod tests {
     #[test]
     fn switch_to_absolute() {
         let mut s = make_switcher();
-        s.handle(Command::SwitchTo { x: 2, y: 1 }).unwrap();
+        s.handle(Command::SwitchTo(SwitchToTarget { x: 2, y: 1 })).unwrap();
         assert_eq!(s.position(), (2, 1));
         assert_eq!(s.grid().dimensions(), (3, 2));
     }
@@ -913,7 +963,7 @@ mod tests {
     #[test]
     fn move_window_to_monitor_index_valid() {
         let mut s = make_switcher();
-        s.handle(Command::MoveWindowToMonitorIndex(1)).unwrap();
+        s.handle(Command::MoveWindowToMonitorIndex(MonitorIndex(1))).unwrap();
         let monitor_moves = s.wm.monitor_moves.borrow();
         assert_eq!(monitor_moves.len(), 1);
         assert_eq!(monitor_moves[0], "HDMI-A-1");
@@ -922,7 +972,7 @@ mod tests {
     #[test]
     fn move_window_to_monitor_index_zero() {
         let mut s = make_switcher();
-        s.handle(Command::MoveWindowToMonitorIndex(0)).unwrap();
+        s.handle(Command::MoveWindowToMonitorIndex(MonitorIndex(0))).unwrap();
         let monitor_moves = s.wm.monitor_moves.borrow();
         assert_eq!(monitor_moves.len(), 1);
         assert_eq!(monitor_moves[0], "DP-1");
@@ -931,14 +981,14 @@ mod tests {
     #[test]
     fn move_window_to_monitor_index_out_of_range() {
         let mut s = make_switcher();
-        let result = s.handle(Command::MoveWindowToMonitorIndex(5));
+        let result = s.handle(Command::MoveWindowToMonitorIndex(MonitorIndex(5)));
         assert!(result.is_err());
     }
 
     #[test]
     fn move_window_to_monitor_index_does_not_change_grid() {
         let mut s = make_switcher();
-        s.handle(Command::MoveWindowToMonitorIndex(1)).unwrap();
+        s.handle(Command::MoveWindowToMonitorIndex(MonitorIndex(1))).unwrap();
         assert_eq!(s.position(), (0, 0), "grid should not move");
     }
 }

@@ -49,17 +49,30 @@ use std::sync::mpsc;
 /// `commit_threshold` (in `[0.0, 1.0]`) sets the normalised distance the
 /// gesture must exceed before the workspace actually switches on finger
 /// lift.
+///
+/// `commit_while_dragging_threshold`: when set (e.g. `0.8`), the workspace
+/// switches as soon as the gesture reaches that fraction of the way toward
+/// the next cell, without waiting for release. `None` = only commit on
+/// release (default).
+///
+/// `natural_swiping` inverts the gesture direction (swipe right → grid
+/// moves left, like "natural" scroll).  Default: `true`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GestureConfig {
     /// Pixels of travel per normalised unit.  Default: `200.0`.
     pub sensitivity: f64,
-    /// Normalised threshold to commit a switch.  Default: `0.3`.
+    /// Normalised threshold to commit a switch on finger lift.  Default: `0.3`.
     pub commit_threshold: f64,
+    /// If set (0.0–1.0), commit as soon as the gesture reaches this fraction
+    /// toward the next cell, without waiting for release.  Default: `None`.
+    pub commit_while_dragging_threshold: Option<f64>,
     /// Number of fingers for a plain workspace switch.  Default: `3`.
     pub switch_fingers: u32,
     /// Number of fingers for move-window-and-switch.  Default: `4`.
     pub move_fingers: u32,
+    /// Invert gesture direction (natural swiping).  Default: `true`.
+    pub natural_swiping: bool,
 }
 
 impl Default for GestureConfig {
@@ -67,8 +80,10 @@ impl Default for GestureConfig {
         Self {
             sensitivity: 200.0,
             commit_threshold: 0.3,
+            commit_while_dragging_threshold: None,
             switch_fingers: 3,
             move_fingers: 4,
+            natural_swiping: true,
         }
     }
 }
@@ -107,18 +122,30 @@ impl HyprlandGestureSource {
 
 /// Determine the dominant direction from accumulated deltas.
 ///
-/// Returns `None` if neither axis exceeds `threshold` (normalised).
+/// When both axes exceed `threshold`, returns a diagonal direction (45°).
+/// Otherwise returns the cardinal direction of the stronger axis, or `None`
+/// if neither exceeds threshold.
 pub(crate) fn dominant_direction(norm_dx: f64, norm_dy: f64, threshold: f64) -> Option<Direction> {
     let abs_x = norm_dx.abs();
     let abs_y = norm_dy.abs();
 
-    if abs_x >= abs_y && abs_x >= threshold {
+    let over_x = abs_x >= threshold;
+    let over_y = abs_y >= threshold;
+
+    if over_x && over_y {
+        Some(match (norm_dx > 0.0, norm_dy > 0.0) {
+            (true, true) => Direction::DownRight,
+            (true, false) => Direction::UpRight,
+            (false, true) => Direction::DownLeft,
+            (false, false) => Direction::UpLeft,
+        })
+    } else if abs_x >= abs_y && over_x {
         Some(if norm_dx > 0.0 {
             Direction::Right
         } else {
             Direction::Left
         })
-    } else if abs_y > abs_x && abs_y >= threshold {
+    } else if abs_y > abs_x && over_y {
         Some(if norm_dy > 0.0 {
             Direction::Down
         } else {
@@ -132,6 +159,22 @@ pub(crate) fn dominant_direction(norm_dx: f64, norm_dy: f64, threshold: f64) -> 
 /// Clamp `value` to `[-1.0, 1.0]`.
 pub(crate) fn clamp_unit(value: f64) -> f64 {
     value.clamp(-1.0, 1.0)
+}
+
+/// Normalised swipe offset: clamp to [-1, 1] per axis, optionally invert (natural swiping).
+pub(crate) fn normalised_swipe_offset(
+    dx: f64,
+    dy: f64,
+    sensitivity: f64,
+    natural_swiping: bool,
+) -> (f64, f64) {
+    let norm_dx = clamp_unit(dx / sensitivity);
+    let norm_dy = clamp_unit(dy / sensitivity);
+    if natural_swiping {
+        (-norm_dx, -norm_dy)
+    } else {
+        (norm_dx, norm_dy)
+    }
 }
 
 /// Resolve the Hyprland event socket path.
@@ -341,12 +384,24 @@ mod tests {
     }
 
     #[test]
+    fn dominant_direction_diagonals() {
+        let t = 0.3;
+        assert_eq!(dominant_direction(0.5, 0.5, t), Some(Direction::DownRight));
+        assert_eq!(dominant_direction(0.5, -0.5, t), Some(Direction::UpRight));
+        assert_eq!(dominant_direction(-0.5, 0.5, t), Some(Direction::DownLeft));
+        assert_eq!(dominant_direction(-0.5, -0.5, t), Some(Direction::UpLeft));
+        assert_eq!(dominant_direction(0.2, 0.2, t), None);
+    }
+
+    #[test]
     fn default_config_values() {
         let cfg = GestureConfig::default();
         assert_eq!(cfg.sensitivity, 200.0);
         assert_eq!(cfg.commit_threshold, 0.3);
+        assert_eq!(cfg.commit_while_dragging_threshold, None);
         assert_eq!(cfg.switch_fingers, 3);
         assert_eq!(cfg.move_fingers, 4);
+        assert!(cfg.natural_swiping);
     }
 
     #[test]

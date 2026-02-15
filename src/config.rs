@@ -12,8 +12,10 @@
 //!   "gestures": {
 //!     "sensitivity": 200.0,
 //!     "commit_threshold": 0.3,
+//!     "commit_while_dragging_threshold": 0.8,
 //!     "switch_fingers": 3,
-//!     "move_fingers": 4
+//!     "move_fingers": 4,
+//!     "natural_swiping": true
 //!   }
 //! }
 //! ```
@@ -127,8 +129,10 @@ mod tests {
         let gd = GestureConfig::default();
         assert_eq!(cfg.gestures.sensitivity, gd.sensitivity);
         assert_eq!(cfg.gestures.commit_threshold, gd.commit_threshold);
+        assert_eq!(cfg.gestures.commit_while_dragging_threshold, gd.commit_while_dragging_threshold);
         assert_eq!(cfg.gestures.switch_fingers, gd.switch_fingers);
         assert_eq!(cfg.gestures.move_fingers, gd.move_fingers);
+        assert_eq!(cfg.gestures.natural_swiping, gd.natural_swiping);
         let vd = VisualizerConfig::default();
         assert_eq!(cfg.visualizer.cursor_animation_ms, vd.cursor_animation_ms);
         assert_eq!(cfg.visualizer.linger_ms, vd.linger_ms);

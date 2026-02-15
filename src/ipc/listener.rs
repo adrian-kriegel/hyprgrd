@@ -165,7 +165,7 @@ mod tests {
 
         assert_eq!(cmds.len(), 3);
         assert_eq!(cmds[0], Command::Go(Direction::Right));
-        assert_eq!(cmds[1], Command::SwitchTo { x: 2, y: 1 });
+        assert_eq!(cmds[1], Command::SwitchTo(crate::command::SwitchToTarget { x: 2, y: 1 }));
         assert_eq!(cmds[2], Command::CancelMove);
 
         // Clean up.

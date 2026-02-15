@@ -122,19 +122,6 @@ TEST(capitalize_single_char) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// isValidDirection()
-// ═══════════════════════════════════════════════════════════════════════════
-
-TEST(valid_direction_left)  { ASSERT_TRUE(isValidDirection("Left")); }
-TEST(valid_direction_right) { ASSERT_TRUE(isValidDirection("Right")); }
-TEST(valid_direction_up)    { ASSERT_TRUE(isValidDirection("Up")); }
-TEST(valid_direction_down)  { ASSERT_TRUE(isValidDirection("Down")); }
-
-TEST(invalid_direction_lowercase) { ASSERT_FALSE(isValidDirection("left")); }
-TEST(invalid_direction_garbage)   { ASSERT_FALSE(isValidDirection("diagonal")); }
-TEST(invalid_direction_empty)     { ASSERT_FALSE(isValidDirection("")); }
-
-// ═══════════════════════════════════════════════════════════════════════════
 // socketPath()
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -149,253 +136,113 @@ TEST(socket_path_fallback) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// buildGoJson()
+// buildGoJson() — plugin forwards raw arg; daemon parses/validates.
 // ═══════════════════════════════════════════════════════════════════════════
 
-TEST(go_json_right) {
+TEST(go_json_forwards_arg) {
     auto r = buildGoJson("right");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"Go":"Right"})"));
+    ASSERT_EQ(r.value, std::string(R"({"Go":"right"})"));
 }
 
-TEST(go_json_left) {
-    auto r = buildGoJson("left");
+TEST(go_json_trimmed) {
+    auto r = buildGoJson("  left  ");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"Go":"Left"})"));
+    ASSERT_EQ(r.value, std::string(R"({"Go":"left"})"));
 }
 
-TEST(go_json_up) {
-    auto r = buildGoJson("up");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"Go":"Up"})"));
-}
-
-TEST(go_json_down) {
-    auto r = buildGoJson("down");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"Go":"Down"})"));
-}
-
-TEST(go_json_trimmed_input) {
-    auto r = buildGoJson("  right  ");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"Go":"Right"})"));
-}
-
-TEST(go_json_already_capitalized) {
-    auto r = buildGoJson("Down");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"Go":"Down"})"));
-}
-
-TEST(go_json_invalid_direction) {
+TEST(go_json_forwards_any_string) {
     auto r = buildGoJson("diagonal");
-    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.value, std::string(R"({"Go":"diagonal"})"));
 }
 
-TEST(go_json_empty_arg) {
+TEST(go_json_empty_forwarded) {
     auto r = buildGoJson("");
-    ASSERT_FALSE(r.ok);
-}
-
-TEST(go_json_whitespace_only) {
-    auto r = buildGoJson("   ");
-    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.value, std::string(R"({"Go":""})"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// buildMoveGoJson()
+// buildMoveGoJson() — forwards raw arg.
 // ═══════════════════════════════════════════════════════════════════════════
 
-TEST(movego_json_right) {
+TEST(movego_json_forwards_arg) {
     auto r = buildMoveGoJson("right");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowAndGo":"Right"})"));
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowAndGo":"right"})"));
 }
 
-TEST(movego_json_left) {
-    auto r = buildMoveGoJson("left");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowAndGo":"Left"})"));
-}
-
-TEST(movego_json_up) {
-    auto r = buildMoveGoJson("up");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowAndGo":"Up"})"));
-}
-
-TEST(movego_json_down) {
-    auto r = buildMoveGoJson("down");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowAndGo":"Down"})"));
-}
-
-TEST(movego_json_trimmed_input) {
+TEST(movego_json_trimmed) {
     auto r = buildMoveGoJson("\tup\n");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowAndGo":"Up"})"));
-}
-
-TEST(movego_json_invalid) {
-    auto r = buildMoveGoJson("sideways");
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowAndGo":"up"})"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// buildSwitchJson()
+// buildSwitchJson() — forwards raw arg; daemon parses "col row".
 // ═══════════════════════════════════════════════════════════════════════════
 
-TEST(switch_json_origin) {
+TEST(switch_json_forwards_arg) {
     auto r = buildSwitchJson("0 0");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":{"x":0,"y":0}})"));
+    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":"0 0"})"));
 }
 
-TEST(switch_json_positive) {
-    auto r = buildSwitchJson("2 1");
+TEST(switch_json_trimmed) {
+    auto r = buildSwitchJson("  2   1  ");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":{"x":2,"y":1}})"));
+    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":"2   1"})"));
 }
 
-TEST(switch_json_large_values) {
-    auto r = buildSwitchJson("99 42");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":{"x":99,"y":42}})"));
-}
-
-TEST(switch_json_extra_whitespace) {
-    auto r = buildSwitchJson("  3   4  ");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":{"x":3,"y":4}})"));
-}
-
-TEST(switch_json_negative_col) {
-    auto r = buildSwitchJson("-1 0");
-    ASSERT_FALSE(r.ok);
-}
-
-TEST(switch_json_negative_row) {
-    auto r = buildSwitchJson("0 -1");
-    ASSERT_FALSE(r.ok);
-}
-
-TEST(switch_json_missing_row) {
-    auto r = buildSwitchJson("2");
-    ASSERT_FALSE(r.ok);
-}
-
-TEST(switch_json_empty) {
-    auto r = buildSwitchJson("");
-    ASSERT_FALSE(r.ok);
-}
-
-TEST(switch_json_non_numeric) {
+TEST(switch_json_forwards_any_string) {
     auto r = buildSwitchJson("abc def");
-    ASSERT_FALSE(r.ok);
-}
-
-TEST(switch_json_float_input) {
-    // "1.5 2" — iss >> int reads 1, then tries to read ".5 2" which is not an int
-    auto r = buildSwitchJson("1.5 2");
-    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":"abc def"})"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// buildMoveToMonitorJson()
+// buildMoveToMonitorJson() — forwards raw arg.
 // ═══════════════════════════════════════════════════════════════════════════
 
-TEST(movetomonitor_json_right) {
+TEST(movetomonitor_json_forwards_arg) {
     auto r = buildMoveToMonitorJson("right");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":"Right"})"));
-}
-
-TEST(movetomonitor_json_left) {
-    auto r = buildMoveToMonitorJson("left");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":"Left"})"));
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":"right"})"));
 }
 
 TEST(movetomonitor_json_up) {
     auto r = buildMoveToMonitorJson("up");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":"Up"})"));
-}
-
-TEST(movetomonitor_json_down) {
-    auto r = buildMoveToMonitorJson("down");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":"Down"})"));
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":"up"})"));
 }
 
 TEST(movetomonitor_json_trimmed) {
     auto r = buildMoveToMonitorJson("  right  ");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":"Right"})"));
-}
-
-TEST(movetomonitor_json_invalid) {
-    auto r = buildMoveToMonitorJson("diagonal");
-    ASSERT_FALSE(r.ok);
-}
-
-TEST(movetomonitor_json_empty) {
-    auto r = buildMoveToMonitorJson("");
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":"right"})"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // buildMoveToMonitorIndexJson()
 // ═══════════════════════════════════════════════════════════════════════════
 
-TEST(movetomonitorindex_json_zero) {
+TEST(movetomonitorindex_json_forwards_arg) {
     auto r = buildMoveToMonitorIndexJson("0");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":0})"));
-}
-
-TEST(movetomonitorindex_json_positive) {
-    auto r = buildMoveToMonitorIndexJson("2");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":2})"));
-}
-
-TEST(movetomonitorindex_json_large) {
-    auto r = buildMoveToMonitorIndexJson("42");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":42})"));
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":"0"})"));
 }
 
 TEST(movetomonitorindex_json_trimmed) {
     auto r = buildMoveToMonitorIndexJson("  3  ");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":3})"));
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":"3"})"));
 }
 
-TEST(movetomonitorindex_json_negative) {
-    auto r = buildMoveToMonitorIndexJson("-1");
-    ASSERT_FALSE(r.ok);
-}
-
-TEST(movetomonitorindex_json_empty) {
-    auto r = buildMoveToMonitorIndexJson("");
-    ASSERT_FALSE(r.ok);
-}
-
-TEST(movetomonitorindex_json_non_numeric) {
+TEST(movetomonitorindex_json_forwards_any_string) {
     auto r = buildMoveToMonitorIndexJson("abc");
-    ASSERT_FALSE(r.ok);
-}
-
-TEST(movetomonitorindex_json_extra_arg) {
-    auto r = buildMoveToMonitorIndexJson("1 2");
-    ASSERT_FALSE(r.ok);
-}
-
-TEST(movetomonitorindex_json_float) {
-    auto r = buildMoveToMonitorIndexJson("1.5");
-    ASSERT_FALSE(r.ok);
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":"abc"})"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -405,65 +252,25 @@ TEST(movetomonitorindex_json_float) {
 // the plugin produces matches exactly what serde expects.
 // ═══════════════════════════════════════════════════════════════════════════
 
-TEST(json_compat_go_all_directions) {
-    // serde(Deserialize) for Command::Go(Direction::Right) expects:
-    //   {"Go":"Right"}
-    const std::string expected[] = {
-        R"({"Go":"Left"})",
-        R"({"Go":"Right"})",
-        R"({"Go":"Up"})",
-        R"({"Go":"Down"})",
-    };
+TEST(json_compat_go_forwards_daemon_parses) {
     const char* dirs[] = {"left", "right", "up", "down"};
     for (int i = 0; i < 4; ++i) {
         auto r = buildGoJson(dirs[i]);
         ASSERT_TRUE(r.ok);
-        ASSERT_EQ(r.value, expected[i]);
+        ASSERT_EQ(r.value, std::string(R"({"Go":")") + dirs[i] + "\"}");
     }
 }
 
-TEST(json_compat_movego_all_directions) {
-    const std::string expected[] = {
-        R"({"MoveWindowAndGo":"Left"})",
-        R"({"MoveWindowAndGo":"Right"})",
-        R"({"MoveWindowAndGo":"Up"})",
-        R"({"MoveWindowAndGo":"Down"})",
-    };
-    const char* dirs[] = {"left", "right", "up", "down"};
-    for (int i = 0; i < 4; ++i) {
-        auto r = buildMoveGoJson(dirs[i]);
-        ASSERT_TRUE(r.ok);
-        ASSERT_EQ(r.value, expected[i]);
-    }
-}
-
-TEST(json_compat_switch_to) {
+TEST(json_compat_switch_to_forwards_string) {
     auto r = buildSwitchJson("5 3");
     ASSERT_TRUE(r.ok);
-    // serde expects: {"SwitchTo":{"x":5,"y":3}}
-    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":{"x":5,"y":3}})"));
+    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":"5 3"})"));
 }
 
-TEST(json_compat_movetomonitor_all_directions) {
-    const std::string expected[] = {
-        R"({"MoveWindowToMonitor":"Left"})",
-        R"({"MoveWindowToMonitor":"Right"})",
-        R"({"MoveWindowToMonitor":"Up"})",
-        R"({"MoveWindowToMonitor":"Down"})",
-    };
-    const char* dirs[] = {"left", "right", "up", "down"};
-    for (int i = 0; i < 4; ++i) {
-        auto r = buildMoveToMonitorJson(dirs[i]);
-        ASSERT_TRUE(r.ok);
-        ASSERT_EQ(r.value, expected[i]);
-    }
-}
-
-TEST(json_compat_movetomonitorindex) {
+TEST(json_compat_movetomonitorindex_forwards_string) {
     auto r = buildMoveToMonitorIndexJson("1");
     ASSERT_TRUE(r.ok);
-    // serde expects: {"MoveWindowToMonitorIndex":1}
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":1})"));
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":"1"})"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -513,54 +320,43 @@ TEST(swipe_update_json_zero_deltas) {
 // the expected command types — i.e. the mapping from dispatcher to
 // daemon command is correct.
 
-TEST(dispatcher_go_all_directions_roundtrip) {
-    // hyprgrd:go <dir> → {"Go":"<Dir>"}
+TEST(dispatcher_go_forwards_arg) {
     const char* args[] = {"left", "right", "up", "down"};
-    const char* expected_dirs[] = {"Left", "Right", "Up", "Down"};
     for (int i = 0; i < 4; ++i) {
         auto r = buildGoJson(args[i]);
         ASSERT_TRUE(r.ok);
-        std::string expected = std::string(R"({"Go":")") + expected_dirs[i] + "\"}";
-        ASSERT_EQ(r.value, expected);
+        ASSERT_EQ(r.value, std::string(R"({"Go":")") + args[i] + "\"}");
     }
 }
 
-TEST(dispatcher_movego_all_directions_roundtrip) {
-    // hyprgrd:movego <dir> → {"MoveWindowAndGo":"<Dir>"}
+TEST(dispatcher_movego_forwards_arg) {
     const char* args[] = {"left", "right", "up", "down"};
-    const char* expected_dirs[] = {"Left", "Right", "Up", "Down"};
     for (int i = 0; i < 4; ++i) {
         auto r = buildMoveGoJson(args[i]);
         ASSERT_TRUE(r.ok);
-        std::string expected = std::string(R"({"MoveWindowAndGo":")") + expected_dirs[i] + "\"}";
-        ASSERT_EQ(r.value, expected);
+        ASSERT_EQ(r.value, std::string(R"({"MoveWindowAndGo":")") + args[i] + "\"}");
     }
 }
 
-TEST(dispatcher_switch_grid_position) {
-    // hyprgrd:switch 0 0 → {"SwitchTo":{"x":0,"y":0}}
+TEST(dispatcher_switch_forwards_arg) {
     auto r = buildSwitchJson("0 0");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":{"x":0,"y":0}})"));
+    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":"0 0"})"));
 }
 
-TEST(dispatcher_movetomonitor_all_directions_roundtrip) {
-    // hyprgrd:movetomonitor <dir> → {"MoveWindowToMonitor":"<Dir>"}
+TEST(dispatcher_movetomonitor_forwards_arg) {
     const char* args[] = {"left", "right", "up", "down"};
-    const char* expected_dirs[] = {"Left", "Right", "Up", "Down"};
     for (int i = 0; i < 4; ++i) {
         auto r = buildMoveToMonitorJson(args[i]);
         ASSERT_TRUE(r.ok);
-        std::string expected = std::string(R"({"MoveWindowToMonitor":")") + expected_dirs[i] + "\"}";
-        ASSERT_EQ(r.value, expected);
+        ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":")") + args[i] + "\"}");
     }
 }
 
-TEST(dispatcher_movetomonitorindex_value) {
-    // hyprgrd:movetomonitorindex 0 → {"MoveWindowToMonitorIndex":0}
+TEST(dispatcher_movetomonitorindex_forwards_arg) {
     auto r = buildMoveToMonitorIndexJson("0");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":0})"));
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":"0"})"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

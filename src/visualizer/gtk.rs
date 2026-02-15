@@ -21,6 +21,8 @@
 //! | `.grid`                | The `GtkGrid`                                  |
 //! | `.grid-cell`           | Every cell                                     |
 //! | `.grid-cell.active`    | Cell under the cursor (for user CSS hooks)     |
+//! | `.grid-cell.target`    | Cell that will be switched to on release (gesture past threshold) |
+//! | `.grid-cell.tobecreated.target` | Target cell for new row/column to be created    |
 //! | `.grid-cursor`         | The sliding selector highlight                 |
 //!
 //! The `.grid-cursor` appearance is fully CSS-configurable.  Movement is
@@ -44,6 +46,38 @@ use std::time::{Duration, Instant};
 const CELL_SIZE: i32 = 24;
 const CELL_MARGIN: i32 = 3;
 const CELL_PITCH: i32 = CELL_SIZE + 2 * CELL_MARGIN; // 30
+/// Overlay padding (space between screen edge and grid overlay).
+const OVERLAY_PADDING: i32 = 12;
+
+/// Snap the gesture offset vector to the nearest multiple of 45° for display.
+/// Preserves magnitude so the cursor travel feels consistent.
+fn snap_offset_to_45_deg(offset_x: f64, offset_y: f64) -> (f64, f64) {
+    let mag = (offset_x * offset_x + offset_y * offset_y).sqrt();
+    if mag < 1e-10 {
+        return (0.0, 0.0);
+    }
+    let angle = offset_y.atan2(offset_x);
+    const FRAC_PI_4: f64 = std::f64::consts::FRAC_PI_4;
+    let snapped = (angle / FRAC_PI_4).round() * FRAC_PI_4;
+    let ox = mag * snapped.cos();
+    let oy = mag * snapped.sin();
+    (ox, oy)
+}
+
+/// Blend between actual offset and 45°-snapped offset. Alpha follows cubic-bezier(0.25, 0.1, 0.25, 1):
+/// alpha = 1 at p-inf norm 0 (full user), alpha = 0 at p-inf norm 1 (one workspace, full snap).
+fn interpolated_offset(offset_x: f64, offset_y: f64) -> (f64, f64) {
+    let snapped = snap_offset_to_45_deg(offset_x, offset_y);
+    let u = offset_x.abs().max(offset_y.abs()).min(1.0) as f32;
+    if u < 1e-6 {
+        return (offset_x, offset_y);
+    }
+    // ease_scalar(0, 1, u) = y(t) where x(t)=u; we want alpha = 1 - y
+    let alpha = 1.0 - crate::bezier::ease_scalar(0.0, 1.0, u) as f64;
+    let display_ox = alpha * offset_x + (1.0 - alpha) * snapped.0;
+    let display_oy = alpha * offset_y + (1.0 - alpha) * snapped.1;
+    (display_ox, display_oy)
+}
 
 //  Default CSS 
 
@@ -57,7 +91,6 @@ window.background {
 .grid-overlay {
     background-color: rgba(0, 0, 0, 0.75);
     border-radius: 16px;
-    padding: 12px;
 }
 
 .grid {
@@ -71,6 +104,10 @@ window.background {
     border-radius: 6px;
     background-color: rgba(255, 255, 255, 0.08);
     transition: background-color 150ms ease-in-out;
+}
+
+.grid-cell.target {
+    background-color: rgba(255, 255, 255, 0.22);
 }
 
 .grid-cursor {
@@ -168,6 +205,10 @@ impl OverlayGrid {
         overlay.add_overlay(&cursor);
         overlay.set_measure_overlay(&cursor, false);
 
+        overlay.set_margin_start(OVERLAY_PADDING);
+        overlay.set_margin_end(OVERLAY_PADDING);
+        overlay.set_margin_top(OVERLAY_PADDING);
+        overlay.set_margin_bottom(OVERLAY_PADDING);
         container.append(&overlay);
 
         Self {
@@ -186,18 +227,35 @@ impl OverlayGrid {
     }
 
     fn update(&mut self, state: &VisualizerState) {
-        let dims_changed = state.cols != self.cols || state.rows != self.rows;
+        let is_gesture = state.offset_x != 0.0 || state.offset_y != 0.0;
+        let effective_target = state
+            .target_cell
+            .unwrap_or((state.col, state.row));
+        let display_cols = if is_gesture {
+            state.cols.max(effective_target.0 + 1)
+        } else {
+            state.cols
+        };
+        let display_rows = if is_gesture {
+            state.rows.max(effective_target.1 + 1)
+        } else {
+            state.rows
+        };
+
+        let dims_changed = display_cols != self.cols || display_rows != self.rows;
         if dims_changed {
-            self.rebuild_cells(state.cols, state.rows);
+            self.rebuild_cells(display_cols, display_rows, state.cols, state.rows);
         }
         self.apply_classes(state);
 
         let base_x = cell_px(state.col);
         let base_y = cell_px(state.row);
-        let target_x = base_x + state.offset_x * CELL_PITCH as f64;
-        let target_y = base_y + state.offset_y * CELL_PITCH as f64;
-
-        let is_gesture = state.offset_x != 0.0 || state.offset_y != 0.0;
+        let (display_ox, display_oy) = interpolated_offset(state.offset_x, state.offset_y);
+        let mut target_x = base_x + display_ox * CELL_PITCH as f64;
+        let mut target_y = base_y + display_oy * CELL_PITCH as f64;
+        let min_px = CELL_MARGIN as f64;
+        target_x = target_x.max(min_px);
+        target_y = target_y.max(min_px);
 
         if !self.initialised {
             self.snap(target_x, target_y);
@@ -263,16 +321,22 @@ impl OverlayGrid {
         self.cursor.set_margin_top(self.cur_y.round() as i32);
     }
 
-    fn rebuild_cells(&mut self, cols: usize, rows: usize) {
+    fn rebuild_cells(
+        &mut self,
+        display_cols: usize,
+        display_rows: usize,
+        _base_cols: usize,
+        _base_rows: usize,
+    ) {
         for cell in self.cells.drain(..) {
             self.grid_widget.remove(&cell);
         }
-        self.cols = cols;
-        self.rows = rows;
-        self.cells.reserve(cols * rows);
+        self.cols = display_cols;
+        self.rows = display_rows;
+        self.cells.reserve(display_cols * display_rows);
 
-        for row in 0..rows {
-            for col in 0..cols {
+        for row in 0..display_rows {
+            for col in 0..display_cols {
                 let cell = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
                 cell.add_css_class("grid-cell");
                 cell.set_size_request(CELL_SIZE, CELL_SIZE);
@@ -295,15 +359,36 @@ impl OverlayGrid {
     }
 
     fn apply_classes(&self, state: &VisualizerState) {
+        let is_gesture = state.offset_x != 0.0 || state.offset_y != 0.0;
+        let effective_target = state
+            .target_cell
+            .unwrap_or((state.col, state.row));
+
+        let is_tobecreated_cell = is_gesture
+            && (effective_target.0 >= state.cols || effective_target.1 >= state.rows);
+
         for row in 0..self.rows {
             for col in 0..self.cols {
                 let cell = &self.cells[row * self.cols + col];
                 let is_active = col == state.col && row == state.row;
+                let is_target = is_gesture && col == effective_target.0 && row == effective_target.1;
+                let is_tobecreated =
+                    is_tobecreated_cell && col == effective_target.0 && row == effective_target.1;
 
                 if is_active {
                     cell.add_css_class("active");
                 } else {
                     cell.remove_css_class("active");
+                }
+                if is_target {
+                    cell.add_css_class("target");
+                } else {
+                    cell.remove_css_class("target");
+                }
+                if is_tobecreated {
+                    cell.add_css_class("tobecreated");
+                } else {
+                    cell.remove_css_class("tobecreated");
                 }
             }
         }
@@ -385,7 +470,7 @@ pub fn run_main_loop(
             if shown_kind.get() != ShownKind::ManuallyShown {
                 return;
             }
-            let cmd = Command::SwitchTo { x: col, y: row };
+            let cmd = Command::SwitchTo(crate::command::SwitchToTarget { x: col, y: row });
             if let Err(e) = cmd_tx.send(cmd) {
                 error!(target: "hyprgrd::visualizer", "failed to dispatch cell click: {}", e);
             }

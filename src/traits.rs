@@ -82,7 +82,10 @@ pub struct VisualizerState {
     pub offset_x: f64,
     /// Gesture offset on the Y axis, normalised to `[-1.0, 1.0]`.
     /// `0.0` when no gesture is active.
-    pub offset_y: f64
+    pub offset_y: f64,
+    /// When sliding with the touchpad, the cell that would be switched to on
+    /// release. Set only once the gesture has reached the commit threshold.
+    pub target_cell: Option<(usize, usize)>,
 }
 
 impl VisualizerState {
@@ -95,6 +98,7 @@ impl VisualizerState {
             row,
             offset_x,
             offset_y,
+            target_cell: None,
         }
     }
 }
@@ -258,7 +262,7 @@ mod tests {
         let mut src = MockSource {
             commands: vec![
                 Command::Go(Direction::Right),
-                Command::SwitchTo { x: 2, y: 1 },
+                Command::SwitchTo(crate::command::SwitchToTarget { x: 2, y: 1 }),
             ],
         };
         let (tx, rx) = mpsc::channel();
@@ -266,7 +270,7 @@ mod tests {
         let cmds: Vec<Command> = rx.try_iter().collect();
         assert_eq!(cmds.len(), 2);
         assert_eq!(cmds[0], Command::Go(Direction::Right));
-        assert_eq!(cmds[1], Command::SwitchTo { x: 2, y: 1 });
+        assert_eq!(cmds[1], Command::SwitchTo(crate::command::SwitchToTarget { x: 2, y: 1 }));
     }
 }
 
