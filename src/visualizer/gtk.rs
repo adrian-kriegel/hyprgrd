@@ -36,6 +36,7 @@ use gtk4::{gdk, glib};
 use gtk4_layer_shell::LayerShell;
 use log::{debug, error, info, warn};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -464,22 +465,16 @@ pub fn run_main_loop(
 
     load_css(&css_path);
 
-    //  Layer-shell overlay window 
-    let window = gtk4::Window::new();
-    window.init_layer_shell();
-    window.set_layer(gtk4_layer_shell::Layer::Overlay);
-    window.set_namespace("hyprgrd");
-    window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::None);
-    window.set_decorated(false);
-    window.remove_css_class("background");
-
-    let container = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    container.add_css_class("grid-overlay");
-    container.set_halign(gtk4::Align::Center);
-    container.set_valign(gtk4::Align::Center);
-    window.set_child(Some(&container));
-
+    // Per-monitor overlay cache.
+    //
+    // We keep one layer-shell window per monitor (lazily created on first
+    // use) because wlr-layer-shell forbids changing the output of a mapped
+    // surface — the previous "single window, set_monitor on every show"
+    // approach corrupted the wl_surface and crashed the GL renderer.
+    // Each window calls `set_monitor()` exactly once, before its first
+    // `present()`, and is then reused for the lifetime of the process.
     let shown_kind = Rc::new(Cell::new(ShownKind::Hidden));
+    let current_shown: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
     let on_cell_click: Rc<dyn Fn(usize, usize)> = {
         let cmd_tx = cmd_tx.clone();
@@ -495,35 +490,11 @@ pub fn run_main_loop(
         })
     };
 
-    //  Persistent overlay grid
-    let mut overlay_grid = OverlayGrid::new(&container, &vis_config, Some(on_cell_click));
-
-    //  Initial render — do NOT present yet.
-    //
-    // Calling `present()` on a layer-shell window commits the wl_surface,
-    // which "freezes" the chosen output: per the wlr-layer-shell protocol
-    // the monitor of a layer surface may not change after the surface is
-    // mapped. We used to present-then-hide here so the surface was already
-    // mapped by the time the first ShowAuto/ToggleManual arrived; that
-    // made every subsequent `set_monitor()` call a protocol violation,
-    // which on the NVIDIA GL renderer manifested as a SIGSEGV inside
-    // libgdk/libnvidia-glcore on the main thread (see crash with frame
-    // `hyprgrd::visualizer::gtk::run_main_loop`).
-    //
-    // Instead, defer the first `present()` until the first show event,
-    // when we already know the target monitor.
-    overlay_grid.update(&initial_state);
-    info!(
-        "overlay built (unmapped): {}x{} at ({}, {})",
-        initial_state.cols, initial_state.rows, initial_state.col, initial_state.row
-    );
-
-    // Track whether the layer surface has been committed to a monitor.
-    // Once `true`, `set_monitor` must NOT be called again on this window.
-    let mut mapped_on_monitor: Option<String> = None;
+    let overlays: Rc<RefCell<HashMap<String, MonitorOverlay>>> =
+        Rc::new(RefCell::new(HashMap::new()));
 
     info!(
-        "visualizer ready (cursor {}ms, linger {}ms, fade {}ms, CSS: {})",
+        "visualizer ready (cursor {}ms, linger {}ms, fade {}ms, CSS: {}); initial state {}x{} at ({}, {})",
         vis_config.cursor_animation_ms,
         vis_config.linger_ms,
         vis_config.fade_out_ms,
@@ -531,85 +502,18 @@ pub fn run_main_loop(
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<built-in>".into()),
+        initial_state.cols, initial_state.rows, initial_state.col, initial_state.row,
     );
-
-    //  Visibility state machine
-    let mut visibility = Visibility::Hidden;
 
     //  Main event loop (~60 fps)
     let dispatch_cell = Rc::new(RefCell::new(dispatch));
     let shown_kind_for_loop = Rc::clone(&shown_kind);
     let dispatch_for_loop = Rc::clone(&dispatch_cell);
+    let overlays_for_loop = Rc::clone(&overlays);
+    let current_shown_for_loop = Rc::clone(&current_shown);
+    let on_cell_click_for_loop = Rc::clone(&on_cell_click);
+    let vis_config_for_loop = vis_config.clone();
     glib::timeout_add_local(Duration::from_millis(16), move || {
-        // Helper: present the layer-shell window on `requested_monitor`,
-        // honouring the wlr-layer-shell rule that the output of a layer
-        // surface is fixed at first commit.
-        //
-        // - First show: call `set_monitor()` (if a monitor was resolved),
-        //   then `present()`. Record the monitor name so we never call
-        //   `set_monitor()` again on this surface.
-        // - Subsequent show on the same monitor: just `set_visible(true)` /
-        //   `present()`.
-        // - Subsequent show on a *different* monitor: log a warning and
-        //   show on the previously-mapped monitor. A proper fix (one
-        //   window per monitor) lands in a follow-up commit; until then
-        //   showing on the wrong monitor is strictly preferable to a
-        //   SIGSEGV inside libgdk/libnvidia-glcore.
-        let mut show_on_monitor = |
-            window: &gtk4::Window,
-            requested_name: Option<&str>,
-            requested_monitor: Option<gdk::Monitor>,
-        | {
-            match (&mapped_on_monitor, requested_monitor) {
-                (None, Some(monitor)) => {
-                    let geom = monitor.geometry();
-                    info!(
-                        target: "hyprgrd::visualizer",
-                        "layer-shell: set_monitor before first map → {} at ({}, {})",
-                        requested_name.unwrap_or("<unknown>"),
-                        geom.x(), geom.y()
-                    );
-                    window.set_monitor(&monitor);
-                    mapped_on_monitor = requested_name.map(str::to_owned)
-                        .or_else(|| Some(format!("@{},{}", geom.x(), geom.y())));
-                }
-                (None, None) => {
-                    info!(
-                        target: "hyprgrd::visualizer",
-                        "layer-shell: first map without a resolved monitor — compositor will pick"
-                    );
-                    mapped_on_monitor = Some("<compositor-default>".to_string());
-                }
-                (Some(current), Some(_)) if requested_name == Some(current.as_str()) => {
-                    debug!(
-                        target: "hyprgrd::visualizer",
-                        "layer-shell: already mapped on {}", current
-                    );
-                }
-                (Some(current), requested) => {
-                    let req = requested
-                        .as_ref()
-                        .map(|m| {
-                            let g = m.geometry();
-                            requested_name
-                                .map(str::to_owned)
-                                .unwrap_or_else(|| format!("@{},{}", g.x(), g.y()))
-                        })
-                        .unwrap_or_else(|| "<unknown>".to_string());
-                    warn!(
-                        target: "hyprgrd::visualizer",
-                        "layer-shell: cannot move mapped surface from {} to {} \
-                         (wlr-layer-shell forbids changing the output of a mapped surface); \
-                         showing on {} instead",
-                        current, req, current
-                    );
-                }
-            }
-            debug!(target: "hyprgrd::visualizer", "layer-shell: set_visible(true) + present()");
-            window.set_visible(true);
-            window.present();
-        };
-
         // 1. Drain commands and forward to the switcher via the dispatch callback.
         let mut disconnected = false;
         loop {
@@ -630,65 +534,54 @@ pub fn run_main_loop(
         while let Ok(event) = vis_rx.try_recv() {
             match event {
                 VisualizerEvent::ShowAuto(payload) => {
-                    let state = &payload.state;
+                    let state = payload.state.clone();
                     debug!(
+                        target: "hyprgrd::visualizer",
                         "SHOW_AUTO {}x{} pos=({},{}) off=({:.2},{:.2})",
                         state.cols, state.rows, state.col, state.row,
                         state.offset_x, state.offset_y
                     );
-
-                    overlay_grid.update(state);
-                    container.set_opacity(1.0);
-                    container.remove_css_class("mode-manual");
-                    container.add_css_class("mode-auto");
-                    window.set_cursor_from_name(None::<&str>);
-
-                    let monitor = get_active_monitor(
-                        payload.active_monitor_name.as_deref(),
+                    show_on_target_monitor(
+                        &overlays_for_loop,
+                        &current_shown_for_loop,
+                        &on_cell_click_for_loop,
+                        &vis_config_for_loop,
+                        &payload.active_monitor_name,
                         &payload.monitors,
+                        &state,
+                        ShowMode::Auto,
                     );
-                    show_on_monitor(
-                        &window,
-                        payload.active_monitor_name.as_deref(),
-                        monitor,
-                    );
-                    visibility = Visibility::Visible;
                     shown_kind_for_loop.set(ShownKind::AutomaticallyShown);
                 }
                 VisualizerEvent::ToggleManual(payload) => {
-                    let state = &payload.state;
+                    let state = payload.state.clone();
                     match shown_kind_for_loop.get() {
                         ShownKind::ManuallyShown => {
-                            debug!("TOGGLE_MANUAL → hide (instant)");
-                            window.set_visible(false);
-                            container.set_opacity(1.0);
-                            container.remove_css_class("mode-auto");
-                            container.remove_css_class("mode-manual");
-                            window.set_cursor_from_name(None::<&str>);
-                            visibility = Visibility::Hidden;
+                            debug!(target: "hyprgrd::visualizer", "TOGGLE_MANUAL → hide (instant)");
+                            hide_currently_shown(
+                                &overlays_for_loop,
+                                &current_shown_for_loop,
+                                /*instant=*/ true,
+                                /*linger=*/ Duration::ZERO,
+                            );
                             shown_kind_for_loop.set(ShownKind::Hidden);
                         }
                         ShownKind::Hidden | ShownKind::AutomaticallyShown => {
                             debug!(
+                                target: "hyprgrd::visualizer",
                                 "TOGGLE_MANUAL → show {}x{} pos=({},{})",
                                 state.cols, state.rows, state.col, state.row
                             );
-                            overlay_grid.update(state);
-                            container.set_opacity(1.0);
-                            container.remove_css_class("mode-auto");
-                            container.add_css_class("mode-manual");
-                            window.set_cursor_from_name(Some("pointer"));
-
-                            let monitor = get_active_monitor(
-                                payload.active_monitor_name.as_deref(),
+                            show_on_target_monitor(
+                                &overlays_for_loop,
+                                &current_shown_for_loop,
+                                &on_cell_click_for_loop,
+                                &vis_config_for_loop,
+                                &payload.active_monitor_name,
                                 &payload.monitors,
+                                &state,
+                                ShowMode::Manual,
                             );
-                            show_on_monitor(
-                                &window,
-                                payload.active_monitor_name.as_deref(),
-                                monitor,
-                            );
-                            visibility = Visibility::Visible;
                             shown_kind_for_loop.set(ShownKind::ManuallyShown);
                         }
                     }
@@ -696,63 +589,83 @@ pub fn run_main_loop(
                 VisualizerEvent::Hide => {
                     match shown_kind_for_loop.get() {
                         ShownKind::Hidden => {
-                            // Nothing to do.
-                            debug!("HIDE (no-op, already hidden)");
+                            debug!(target: "hyprgrd::visualizer", "HIDE (no-op, already hidden)");
                         }
                         ShownKind::ManuallyShown => {
-                            // Manual overlay: hide instantly.
-                            debug!("HIDE (manual, instant)");
-                            window.set_visible(false);
-                            container.set_opacity(1.0);
-                            container.remove_css_class("mode-auto");
-                            container.remove_css_class("mode-manual");
-                            window.set_cursor_from_name(None::<&str>);
-                            visibility = Visibility::Hidden;
+                            debug!(target: "hyprgrd::visualizer", "HIDE (manual, instant)");
+                            hide_currently_shown(
+                                &overlays_for_loop,
+                                &current_shown_for_loop,
+                                /*instant=*/ true,
+                                Duration::ZERO,
+                            );
                             shown_kind_for_loop.set(ShownKind::Hidden);
                         }
                         ShownKind::AutomaticallyShown => {
-                            // Automatic overlay: start linger + fade-out.
                             debug!(
+                                target: "hyprgrd::visualizer",
                                 "HIDE (automatic, linger {}ms + fade {}ms)",
                                 linger_dur.as_millis(),
                                 fade_dur.as_millis()
                             );
-                            visibility = Visibility::Lingering(Instant::now());
-                            // We'll mark Hidden once the fade finishes.
+                            hide_currently_shown(
+                                &overlays_for_loop,
+                                &current_shown_for_loop,
+                                /*instant=*/ false,
+                                linger_dur,
+                            );
+                            // shown_kind stays AutomaticallyShown until the
+                            // fade finishes; the per-overlay state machine
+                            // below will reset it.
                         }
                     }
                 }
             }
         }
 
-        // 3. Advance cursor animation.
-        overlay_grid.tick();
+        // 3. Advance per-monitor cursor animation + visibility state machines.
+        let mut overlays_mut = overlays_for_loop.borrow_mut();
+        let mut clear_current_shown = false;
+        for (key, overlay) in overlays_mut.iter_mut() {
+            overlay.overlay_grid.tick();
 
-        // 4. Advance visibility state machine.
-        match visibility {
-            Visibility::Hidden | Visibility::Visible => {}
-            Visibility::Lingering(since) => {
-                if since.elapsed() >= linger_dur {
-                    if fade_dur.is_zero() {
-                        // Instant hide, no fade.
-                        window.set_visible(false);
-                        container.set_opacity(1.0);
-                        visibility = Visibility::Hidden;
-                    } else {
-                        visibility = Visibility::Fading(Instant::now());
+            match overlay.visibility {
+                Visibility::Hidden | Visibility::Visible => {}
+                Visibility::Lingering(since) => {
+                    if since.elapsed() >= linger_dur {
+                        if fade_dur.is_zero() {
+                            overlay.window.set_visible(false);
+                            overlay.container.set_opacity(1.0);
+                            overlay.visibility = Visibility::Hidden;
+                            debug!(target: "hyprgrd::visualizer", "[{}] hidden after linger", key);
+                            if current_shown_for_loop.borrow().as_deref() == Some(key.as_str()) {
+                                clear_current_shown = true;
+                                shown_kind_for_loop.set(ShownKind::Hidden);
+                            }
+                        } else {
+                            overlay.visibility = Visibility::Fading(Instant::now());
+                        }
+                    }
+                }
+                Visibility::Fading(since) => {
+                    let t = (since.elapsed().as_secs_f64() / fade_dur.as_secs_f64()).min(1.0);
+                    overlay.container.set_opacity(1.0 - t);
+                    if t >= 1.0 {
+                        overlay.window.set_visible(false);
+                        overlay.container.set_opacity(1.0);
+                        overlay.visibility = Visibility::Hidden;
+                        debug!(target: "hyprgrd::visualizer", "[{}] hidden after fade", key);
+                        if current_shown_for_loop.borrow().as_deref() == Some(key.as_str()) {
+                            clear_current_shown = true;
+                            shown_kind_for_loop.set(ShownKind::Hidden);
+                        }
                     }
                 }
             }
-            Visibility::Fading(since) => {
-                let t = (since.elapsed().as_secs_f64() / fade_dur.as_secs_f64()).min(1.0);
-                container.set_opacity(1.0 - t);
-                if t >= 1.0 {
-                    window.set_visible(false);
-                    container.set_opacity(1.0); // reset for next show
-                    visibility = Visibility::Hidden;
-                    shown_kind_for_loop.set(ShownKind::Hidden);
-                }
-            }
+        }
+        drop(overlays_mut);
+        if clear_current_shown {
+            *current_shown_for_loop.borrow_mut() = None;
         }
 
         if disconnected {
@@ -766,6 +679,181 @@ pub fn run_main_loop(
     let main_loop = glib::MainLoop::new(None, false);
     main_loop.run();
     info!("GLib main loop exited");
+}
+
+//  Per-monitor overlay state 
+
+/// One layer-shell overlay window, bound to a single GDK monitor for life.
+///
+/// Created lazily on the first show event that targets that monitor.
+/// The output is set via `set_monitor()` exactly once, *before* the first
+/// `present()` call, and never changed again — matching the wlr-layer-shell
+/// rule that the output of a mapped layer surface is fixed at first commit.
+struct MonitorOverlay {
+    window: gtk4::Window,
+    container: gtk4::Box,
+    overlay_grid: OverlayGrid,
+    visibility: Visibility,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShowMode {
+    Auto,
+    Manual,
+}
+
+/// Derive the per-monitor cache key. Prefer the WM-provided name (e.g.
+/// `DP-1`) since that's what every show event gives us; fall back to a
+/// geometry-based key when the monitor is unknown so we still keep one
+/// window per output rather than churning a single anonymous one.
+fn monitor_cache_key(active_name: Option<&str>, monitor: Option<&gdk::Monitor>) -> String {
+    if let Some(n) = active_name {
+        return n.to_string();
+    }
+    if let Some(m) = monitor {
+        let g = m.geometry();
+        return format!("@{},{}", g.x(), g.y());
+    }
+    "<compositor-default>".to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_on_target_monitor(
+    overlays: &Rc<RefCell<HashMap<String, MonitorOverlay>>>,
+    current_shown: &Rc<RefCell<Option<String>>>,
+    on_cell_click: &Rc<dyn Fn(usize, usize)>,
+    vis_config: &VisualizerConfig,
+    active_monitor_name: &Option<String>,
+    monitors: &[MonitorInfo],
+    state: &VisualizerState,
+    mode: ShowMode,
+) {
+    let monitor = get_active_monitor(active_monitor_name.as_deref(), monitors);
+    let key = monitor_cache_key(active_monitor_name.as_deref(), monitor.as_ref());
+
+    // If a different monitor is currently shown, hide it first.
+    let prev = current_shown.borrow().clone();
+    if let Some(ref prev_key) = prev {
+        if prev_key != &key {
+            if let Some(prev_overlay) = overlays.borrow_mut().get_mut(prev_key) {
+                debug!(
+                    target: "hyprgrd::visualizer",
+                    "[{}] hiding (switching active monitor → {})", prev_key, key
+                );
+                prev_overlay.window.set_visible(false);
+                prev_overlay.container.set_opacity(1.0);
+                prev_overlay.visibility = Visibility::Hidden;
+            }
+        }
+    }
+
+    let mut overlays_mut = overlays.borrow_mut();
+    let overlay = overlays_mut.entry(key.clone()).or_insert_with(|| {
+        info!(
+            target: "hyprgrd::visualizer",
+            "[{}] creating new layer-shell window", key
+        );
+        build_monitor_overlay(monitor.as_ref(), &key, on_cell_click, vis_config)
+    });
+
+    overlay.overlay_grid.update(state);
+    overlay.container.set_opacity(1.0);
+    match mode {
+        ShowMode::Auto => {
+            overlay.container.remove_css_class("mode-manual");
+            overlay.container.add_css_class("mode-auto");
+            overlay.window.set_cursor_from_name(None::<&str>);
+        }
+        ShowMode::Manual => {
+            overlay.container.remove_css_class("mode-auto");
+            overlay.container.add_css_class("mode-manual");
+            overlay.window.set_cursor_from_name(Some("pointer"));
+        }
+    }
+    debug!(target: "hyprgrd::visualizer", "[{}] set_visible(true) + present()", key);
+    overlay.window.set_visible(true);
+    overlay.window.present();
+    overlay.visibility = Visibility::Visible;
+
+    *current_shown.borrow_mut() = Some(key);
+}
+
+fn build_monitor_overlay(
+    monitor: Option<&gdk::Monitor>,
+    key: &str,
+    on_cell_click: &Rc<dyn Fn(usize, usize)>,
+    vis_config: &VisualizerConfig,
+) -> MonitorOverlay {
+    let window = gtk4::Window::new();
+    window.init_layer_shell();
+    window.set_layer(gtk4_layer_shell::Layer::Overlay);
+    window.set_namespace("hyprgrd");
+    window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::None);
+    window.set_decorated(false);
+    window.remove_css_class("background");
+
+    // CRITICAL: set_monitor MUST happen before the first present() (which
+    // commits the wl_surface). After that point wlr-layer-shell freezes
+    // the output and any further set_monitor call is a protocol violation.
+    if let Some(m) = monitor {
+        let g = m.geometry();
+        info!(
+            target: "hyprgrd::visualizer",
+            "[{}] set_monitor before first map → ({}, {})",
+            key, g.x(), g.y()
+        );
+        window.set_monitor(m);
+    } else {
+        info!(
+            target: "hyprgrd::visualizer",
+            "[{}] no resolved GDK monitor — compositor will pick the output",
+            key
+        );
+    }
+
+    let container = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    container.add_css_class("grid-overlay");
+    container.set_halign(gtk4::Align::Center);
+    container.set_valign(gtk4::Align::Center);
+    window.set_child(Some(&container));
+
+    let overlay_grid = OverlayGrid::new(&container, vis_config, Some(Rc::clone(on_cell_click)));
+
+    MonitorOverlay {
+        window,
+        container,
+        overlay_grid,
+        visibility: Visibility::Hidden,
+    }
+}
+
+fn hide_currently_shown(
+    overlays: &Rc<RefCell<HashMap<String, MonitorOverlay>>>,
+    current_shown: &Rc<RefCell<Option<String>>>,
+    instant: bool,
+    linger_dur: Duration,
+) {
+    let key = match current_shown.borrow().clone() {
+        Some(k) => k,
+        None => return,
+    };
+    let mut overlays_mut = overlays.borrow_mut();
+    let Some(overlay) = overlays_mut.get_mut(&key) else {
+        return;
+    };
+    if instant {
+        overlay.window.set_visible(false);
+        overlay.container.set_opacity(1.0);
+        overlay.container.remove_css_class("mode-auto");
+        overlay.container.remove_css_class("mode-manual");
+        overlay.window.set_cursor_from_name(None::<&str>);
+        overlay.visibility = Visibility::Hidden;
+        drop(overlays_mut);
+        *current_shown.borrow_mut() = None;
+    } else {
+        overlay.visibility = Visibility::Lingering(Instant::now());
+        let _ = linger_dur; // duration applied by the per-overlay state machine
+    }
 }
 
 //  CSS loading 
