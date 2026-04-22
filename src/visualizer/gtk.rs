@@ -398,20 +398,38 @@ impl OverlayGrid {
 /// Resolve the GDK monitor for the given active monitor name and WM monitor list.
 /// Matches by position (x, y) since monitor names from the WM (e.g., "DP-1")
 /// may not match GDK monitor identifiers.
+///
+/// Returns `None` (rather than panicking) on any failure — missing display,
+/// mid-iteration monitor list mutation, etc. — so that monitor hot-plug or
+/// DPMS events on the GTK main thread cannot bring the process down.
 fn get_active_monitor(
     active_monitor_name: Option<&str>,
     monitors: &[MonitorInfo],
 ) -> Option<gdk::Monitor> {
     let active_name = active_monitor_name?;
-    let display = gdk::Display::default()
-        .expect("GDK display must be available for visualizer");
+    let display = match gdk::Display::default() {
+        Some(d) => d,
+        None => {
+            warn!(target: "hyprgrd::visualizer", "no GDK display while resolving monitor");
+            return None;
+        }
+    };
 
     let active_monitor_info = monitors.iter().find(|m| m.name == active_name)?;
     display
         .monitors()
         .iter::<gdk::Monitor>()
         .find_map(|res| {
-            let m = res.expect("monitor list mutated during iteration while selecting monitor");
+            let m = match res {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(
+                        target: "hyprgrd::visualizer",
+                        "monitor list mutated during iteration: {}", e
+                    );
+                    return None;
+                }
+            };
             let geometry = m.geometry();
             if geometry.x() == active_monitor_info.x && geometry.y() == active_monitor_info.y {
                 Some(m)
@@ -480,14 +498,29 @@ pub fn run_main_loop(
     //  Persistent overlay grid
     let mut overlay_grid = OverlayGrid::new(&container, &vis_config, Some(on_cell_click));
 
-    //  Initial render + present (maps the Wayland surface)
+    //  Initial render — do NOT present yet.
+    //
+    // Calling `present()` on a layer-shell window commits the wl_surface,
+    // which "freezes" the chosen output: per the wlr-layer-shell protocol
+    // the monitor of a layer surface may not change after the surface is
+    // mapped. We used to present-then-hide here so the surface was already
+    // mapped by the time the first ShowAuto/ToggleManual arrived; that
+    // made every subsequent `set_monitor()` call a protocol violation,
+    // which on the NVIDIA GL renderer manifested as a SIGSEGV inside
+    // libgdk/libnvidia-glcore on the main thread (see crash with frame
+    // `hyprgrd::visualizer::gtk::run_main_loop`).
+    //
+    // Instead, defer the first `present()` until the first show event,
+    // when we already know the target monitor.
     overlay_grid.update(&initial_state);
-    window.present();
-    window.set_visible(false);
     info!(
-        "overlay mapped (hidden): {}x{} at ({}, {})",
+        "overlay built (unmapped): {}x{} at ({}, {})",
         initial_state.cols, initial_state.rows, initial_state.col, initial_state.row
     );
+
+    // Track whether the layer surface has been committed to a monitor.
+    // Once `true`, `set_monitor` must NOT be called again on this window.
+    let mut mapped_on_monitor: Option<String> = None;
 
     info!(
         "visualizer ready (cursor {}ms, linger {}ms, fade {}ms, CSS: {})",
@@ -508,6 +541,75 @@ pub fn run_main_loop(
     let shown_kind_for_loop = Rc::clone(&shown_kind);
     let dispatch_for_loop = Rc::clone(&dispatch_cell);
     glib::timeout_add_local(Duration::from_millis(16), move || {
+        // Helper: present the layer-shell window on `requested_monitor`,
+        // honouring the wlr-layer-shell rule that the output of a layer
+        // surface is fixed at first commit.
+        //
+        // - First show: call `set_monitor()` (if a monitor was resolved),
+        //   then `present()`. Record the monitor name so we never call
+        //   `set_monitor()` again on this surface.
+        // - Subsequent show on the same monitor: just `set_visible(true)` /
+        //   `present()`.
+        // - Subsequent show on a *different* monitor: log a warning and
+        //   show on the previously-mapped monitor. A proper fix (one
+        //   window per monitor) lands in a follow-up commit; until then
+        //   showing on the wrong monitor is strictly preferable to a
+        //   SIGSEGV inside libgdk/libnvidia-glcore.
+        let mut show_on_monitor = |
+            window: &gtk4::Window,
+            requested_name: Option<&str>,
+            requested_monitor: Option<gdk::Monitor>,
+        | {
+            match (&mapped_on_monitor, requested_monitor) {
+                (None, Some(monitor)) => {
+                    let geom = monitor.geometry();
+                    info!(
+                        target: "hyprgrd::visualizer",
+                        "layer-shell: set_monitor before first map → {} at ({}, {})",
+                        requested_name.unwrap_or("<unknown>"),
+                        geom.x(), geom.y()
+                    );
+                    window.set_monitor(&monitor);
+                    mapped_on_monitor = requested_name.map(str::to_owned)
+                        .or_else(|| Some(format!("@{},{}", geom.x(), geom.y())));
+                }
+                (None, None) => {
+                    info!(
+                        target: "hyprgrd::visualizer",
+                        "layer-shell: first map without a resolved monitor — compositor will pick"
+                    );
+                    mapped_on_monitor = Some("<compositor-default>".to_string());
+                }
+                (Some(current), Some(_)) if requested_name == Some(current.as_str()) => {
+                    debug!(
+                        target: "hyprgrd::visualizer",
+                        "layer-shell: already mapped on {}", current
+                    );
+                }
+                (Some(current), requested) => {
+                    let req = requested
+                        .as_ref()
+                        .map(|m| {
+                            let g = m.geometry();
+                            requested_name
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| format!("@{},{}", g.x(), g.y()))
+                        })
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    warn!(
+                        target: "hyprgrd::visualizer",
+                        "layer-shell: cannot move mapped surface from {} to {} \
+                         (wlr-layer-shell forbids changing the output of a mapped surface); \
+                         showing on {} instead",
+                        current, req, current
+                    );
+                }
+            }
+            debug!(target: "hyprgrd::visualizer", "layer-shell: set_visible(true) + present()");
+            window.set_visible(true);
+            window.present();
+        };
+
         // 1. Drain commands and forward to the switcher via the dispatch callback.
         let mut disconnected = false;
         loop {
@@ -541,20 +643,15 @@ pub fn run_main_loop(
                     container.add_css_class("mode-auto");
                     window.set_cursor_from_name(None::<&str>);
 
-                    if let Some(monitor) = get_active_monitor(
+                    let monitor = get_active_monitor(
                         payload.active_monitor_name.as_deref(),
                         &payload.monitors,
-                    ) {
-                        window.set_monitor(&monitor);
-                        let geometry = monitor.geometry();
-                        info!(
-                            "visualizer set to monitor at ({}, {})",
-                            geometry.x(), geometry.y()
-                        );
-                    }
-
-                    window.set_visible(true);
-                    window.present();
+                    );
+                    show_on_monitor(
+                        &window,
+                        payload.active_monitor_name.as_deref(),
+                        monitor,
+                    );
                     visibility = Visibility::Visible;
                     shown_kind_for_loop.set(ShownKind::AutomaticallyShown);
                 }
@@ -582,20 +679,15 @@ pub fn run_main_loop(
                             container.add_css_class("mode-manual");
                             window.set_cursor_from_name(Some("pointer"));
 
-                            if let Some(monitor) = get_active_monitor(
+                            let monitor = get_active_monitor(
                                 payload.active_monitor_name.as_deref(),
                                 &payload.monitors,
-                            ) {
-                                window.set_monitor(&monitor);
-                                let geometry = monitor.geometry();
-                                info!(
-                                    "visualizer set to monitor at ({}, {})",
-                                    geometry.x(), geometry.y()
-                                );
-                            }
-
-                            window.set_visible(true);
-                            window.present();
+                            );
+                            show_on_monitor(
+                                &window,
+                                payload.active_monitor_name.as_deref(),
+                                monitor,
+                            );
                             visibility = Visibility::Visible;
                             shown_kind_for_loop.set(ShownKind::ManuallyShown);
                         }
