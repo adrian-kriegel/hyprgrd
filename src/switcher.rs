@@ -126,10 +126,11 @@ impl<W: WindowManager> GridSwitcher<W> {
     /// monitor is focused.
     ///
     /// This delegates to the underlying [`WindowManager::active_monitor`].
-    pub fn active_monitor(&self) -> Result<Option<String>, SwitcherError> {
+    pub fn active_monitor(&self) -> Result<String, SwitcherError> {
         self.wm
             .active_monitor()
-            .map_err(|e| SwitcherError::WindowManager(e.to_string()))
+            .map_err(|e| SwitcherError::WindowManager(e.to_string()))?
+            .ok_or_else(|| SwitcherError::WindowManager("no active monitor".to_string()))
     }
 
     /// Return the list of monitors the window manager knows about.
@@ -171,46 +172,7 @@ impl<W: WindowManager> GridSwitcher<W> {
 
             Command::MoveWindowAndGo(dir) => {
                 info!("move window and go {}", dir);
-                let (col, row) = self.position();
-                let (target_col, target_row) = Grid::get_abs_from(dir, col, row);
-
-                // Figure out which monitor is currently focused so we move
-                // the window to the workspace slice for that monitor.
-                let active_monitor = self
-                    .wm
-                    .active_monitor()
-                    .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
-
-                let active = active_monitor.ok_or_else(|| {
-                    SwitcherError::WindowManager("no active monitor".to_string())
-                })?;
-
-                let (active_index, _) = self
-                    .monitor_positions
-                    .iter()
-                    .enumerate()
-                    .find(|(_, p)| p.name == active)
-                    .ok_or_else(|| {
-                        SwitcherError::WindowManager(format!(
-                            "active monitor {} has no grid mapping",
-                            active
-                        ))
-                    })?;
-
-                let target_ws = Self::compute_workspace_id(
-                    target_col,
-                    target_row,
-                    active_index,
-                    self.monitor_positions.len(),
-                );
-
-                self.wm
-                    .move_window_to_workspace(target_ws)
-                    .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
-
-                // Step 3: Execute the same logic as the `Go` command.
-                // This updates the grid, switches workspaces, and shows the visualizer.
-                self.go(dir)?;
+                self.move_and_go(dir)?
             }
 
             Command::MoveWindowToMonitor(dir) => {
@@ -426,13 +388,8 @@ impl<W: WindowManager> GridSwitcher<W> {
     fn apply_current_workspace(&self) -> Result<(), SwitcherError> {
         let (col, row) = self.position();
 
-        let active_monitor = self
-            .wm
-            .active_monitor()
-            .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
-
-        let active = active_monitor
-            .ok_or_else(|| SwitcherError::WindowManager("no active monitor".to_string()))?;
+        let active = self.
+            active_monitor()?;
 
         let mut entries: Vec<(&str, i32)> = self
             .monitor_positions
@@ -446,6 +403,7 @@ impl<W: WindowManager> GridSwitcher<W> {
             })
             .collect();
 
+        // Move current monitor to the end to make sure it is switched last.
         if let Some(pos) = entries.iter().position(|(mon, _)| *mon == active.as_str()) {
             let entry = entries.remove(pos);
             entries.push(entry);
@@ -469,47 +427,11 @@ impl<W: WindowManager> GridSwitcher<W> {
     ) -> Result<(), SwitcherError> {
         if move_window {
             info!("swipe commit: move window and go {}", dir);
-            let (col, row) = self.position();
-            let (target_col, target_row) = Grid::get_abs_from(dir, col, row);
-
-            let active_monitor = self
-                .wm
-                .active_monitor()
-                .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
-
-            let active = active_monitor.ok_or_else(|| {
-                SwitcherError::WindowManager("no active monitor".to_string())
-            })?;
-
-            let (active_index, _) = self
-                .monitor_positions
-                .iter()
-                .enumerate()
-                .find(|(_, p)| p.name == active)
-                .ok_or_else(|| {
-                    SwitcherError::WindowManager(format!(
-                        "active monitor {} has no grid mapping",
-                        active
-                    ))
-                })?;
-
-            let ws_id = Self::compute_workspace_id(
-                target_col,
-                target_row,
-                active_index,
-                self.monitor_positions.len(),
-            );
-
-            self.wm
-                .move_window_to_workspace(ws_id)
-                .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
-
-            self.go(dir)?;
+            self.move_and_go(dir)
         } else {
             info!("swipe commit: go {}", dir);
-            self.go(dir)?;
+            self.go(dir)
         }
-        Ok(())
     }
 
     /// Core logic for a discrete workspace move in a direction.
@@ -525,6 +447,41 @@ impl<W: WindowManager> GridSwitcher<W> {
         self.hide_visualizer();
         self.apply_current_workspace()?;
         Ok(())
+    }
+
+    fn move_and_go(&mut self, dir : Direction) -> Result<(), SwitcherError> {
+        let (col, row) = self.position();
+        let (target_col, target_row) = Grid::get_abs_from(dir, col, row);
+
+        // Figure out which monitor is currently focused so we move
+        // the window to the workspace slice for that monitor.
+        let active = self
+            .active_monitor()?;
+
+        let (active_index, _) = self
+            .monitor_positions
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.name == active)
+            .ok_or_else(|| {
+                SwitcherError::WindowManager(format!(
+                    "active monitor {} has no grid mapping",
+                    active
+                ))
+            })?;
+
+        let target_ws = Self::compute_workspace_id(
+            target_col,
+            target_row,
+            active_index,
+            self.monitor_positions.len(),
+        );
+
+        self.wm
+            .move_window_to_workspace(target_ws)
+            .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
+
+        self.go(dir)
     }
 
     /// Deterministically compute a workspace id for the given grid coordinate
