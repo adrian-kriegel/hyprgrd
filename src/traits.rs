@@ -36,11 +36,11 @@ pub trait WindowManager {
     ///
     /// The workspace id has been allocated by [`Grid`](crate::grid::Grid)
     /// and is an opaque integer meaningful to the window manager.
-    fn switch_workspace(&self, monitor: &str, workspace_id: i32) -> Result<(), Self::Error>;
+    fn switch_workspace(&self, monitor: &str, workspace_id: GridPosition) -> Result<(), Self::Error>;
 
     /// Move the currently focused window to `workspace_id` **and** switch
     /// the active monitor to that workspace so the user follows the window.
-    fn move_window_to_workspace(&self, workspace_id: i32) -> Result<(), Self::Error>;
+    fn move_window_to_workspace(&self, monitor: &str, workspace_id: GridPosition) -> Result<(), Self::Error>;
 
     /// Move the currently focused window to the given monitor.
     ///
@@ -184,8 +184,8 @@ mod tests {
     /// A test double that records every call made to it.
     #[derive(Debug, Default)]
     struct MockWm {
-        switch_log: std::cell::RefCell<Vec<(String, i32)>>,
-        move_log: std::cell::RefCell<Vec<i32>>,
+        switch_log: std::cell::RefCell<Vec<(String, GridPosition)>>,
+        move_log: std::cell::RefCell<Vec<GridPosition>>,
     }
 
     #[derive(Debug, thiserror::Error)]
@@ -205,14 +205,14 @@ mod tests {
             }])
         }
 
-        fn switch_workspace(&self, monitor: &str, ws: i32) -> Result<(), MockError> {
+        fn switch_workspace(&self, monitor: &str, ws: GridPosition) -> Result<(), MockError> {
             self.switch_log
                 .borrow_mut()
                 .push((monitor.to_string(), ws));
             Ok(())
         }
 
-        fn move_window_to_workspace(&self, ws: i32) -> Result<(), MockError> {
+        fn move_window_to_workspace(&self, _: &str, ws: GridPosition) -> Result<(), MockError> {
             self.move_log.borrow_mut().push(ws);
             Ok(())
         }
@@ -237,9 +237,10 @@ mod tests {
     #[test]
     fn mock_wm_records_switches() {
         let wm = MockWm::default();
-        wm.switch_workspace("MOCK-1", 42).unwrap();
+        let pos = GridPosition::from_coords(4, 2);
+        wm.switch_workspace("MOCK-1", pos).unwrap();
         assert_eq!(wm.switch_log.borrow().len(), 1);
-        assert_eq!(wm.switch_log.borrow()[0], ("MOCK-1".into(), 42));
+        assert_eq!(wm.switch_log.borrow()[0], ("MOCK-1".into(), pos));
     }
 
     //  Mock CommandSource 

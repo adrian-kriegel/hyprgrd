@@ -386,7 +386,7 @@ impl<W: WindowManager> GridSwitcher<W> {
         }
     }
 
-    /// Tell the window manager to switch every monitor to the workspace ids
+    /// Tell the window manager to switch every monitor to the workspace positions
     /// derived from the current grid cell.
     fn apply_current_workspace(&self) -> Result<(), SwitcherError> {
         let position = self.position();
@@ -394,14 +394,15 @@ impl<W: WindowManager> GridSwitcher<W> {
         let active = self.
             active_monitor()?;
 
-        let mut entries: Vec<(&str, i32)> = self
+        // TODO: still required ? 
+        let mut entries: Vec<(&str, GridPosition)> = self
             .monitor_positions
             .iter()
             .enumerate()
-            .map(|(idx, p)| {
+            .map(|(_, p)| {
                 (
                     p.name.as_str(),
-                    Self::compute_workspace_id(position, idx, self.monitor_positions.len()),
+                    position,
                 )
             })
             .collect();
@@ -412,10 +413,9 @@ impl<W: WindowManager> GridSwitcher<W> {
             entries.push(entry);
         }
 
-        for (monitor, ws_id) in &entries {
-            debug!("  {} -> workspace {}", monitor, ws_id);
+        for (monitor, pos) in &entries {
             self.wm
-                .switch_workspace(monitor, *ws_id)
+                .switch_workspace(monitor, *pos)
                 .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
         }
 
@@ -458,64 +458,13 @@ impl<W: WindowManager> GridSwitcher<W> {
         let active = self
             .active_monitor()?;
 
-        let (active_index, _) = self
-            .monitor_positions
-            .iter()
-            .enumerate()
-            .find(|(_, p)| p.name == active)
-            .ok_or_else(|| {
-                SwitcherError::WindowManager(format!(
-                    "active monitor {} has no grid mapping",
-                    active
-                ))
-            })?;
-
-        let target_ws = Self::compute_workspace_id(
-            target_pos,
-            active_index,
-            self.monitor_positions.len(),
-        );
-
         self.wm
-            .move_window_to_workspace(target_ws)
+            .move_window_to_workspace(&active, target_pos)
             .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
 
         self.go(dir)
     }
 
-    /// Deterministically compute a workspace id for the given grid coordinate
-    /// and monitor index.
-    ///
-    /// The formula uses a Cantor pairing function to assign a unique integer to
-    /// each `(col, row)` pair, then multiplies by the number of monitors and
-    /// offsets by the monitor index so that every `(col, row, monitor_index)`
-    /// triple receives a unique, stable id.
-    fn compute_workspace_id(
-        pos: GridPosition,
-        monitor_index: usize,
-        monitor_count: usize,
-    ) -> i32 {
-        let col = pos.col as i64;
-        let row = pos.row as i64;
-        let monitor_index = monitor_index as i64;
-        let monitor_count = monitor_count as i64;
-
-        // Cantor pairing for (col, row): π(col, row)
-        let s = col + row;
-        let pair = s * (s + 1) / 2 + row;
-
-        // Reserve a contiguous block of ids per cell, one per monitor.
-        // Add 1 so that ids start at 1 instead of 0.
-        let id = pair
-            .saturating_mul(monitor_count)
-            .saturating_add(monitor_index)
-            .saturating_add(1);
-
-        // Workspace ids are currently modelled as i32; clamp if we ever exceed
-        // that range (extremely unlikely for realistic grid sizes).
-        // but go ahead and challenge my assumptions, 10x multitaskers!
-        id.clamp(i32::MIN as i64, i32::MAX as i64) as i32
-    }
 }
 
 //  Tests 
@@ -531,8 +480,8 @@ mod tests {
     /// Record-keeping mock window manager.
     #[derive(Debug, Default)]
     struct RecorderWm {
-        switches: RefCell<Vec<(String, i32)>>,
-        moves: RefCell<Vec<i32>>,
+        switches: RefCell<Vec<(String, GridPosition)>>,
+        moves: RefCell<Vec<GridPosition>>,
         monitor_moves: RefCell<Vec<String>>,
         /// Tracks which monitor is currently "focused" in the mock, i.e. where
         /// the mouse cursor would be. We model Hyprland's behaviour where
@@ -566,16 +515,16 @@ mod tests {
             ])
         }
 
-        fn switch_workspace(&self, mon: &str, ws: i32) -> Result<(), RecorderErr> {
-            self.switches.borrow_mut().push((mon.into(), ws));
+        fn switch_workspace(&self, mon: &str, pos: GridPosition) -> Result<(), RecorderErr> {
+            self.switches.borrow_mut().push((mon.into(), pos));
             // Simulate Hyprland: switching a workspace on a monitor also
             // focuses that monitor.
             *self.focused_monitor.borrow_mut() = Some(mon.into());
             Ok(())
         }
 
-        fn move_window_to_workspace(&self, ws: i32) -> Result<(), RecorderErr> {
-            self.moves.borrow_mut().push(ws);
+        fn move_window_to_workspace(&self, _ : &str, pos: GridPosition) -> Result<(), RecorderErr> {
+            self.moves.borrow_mut().push(pos);
             Ok(())
         }
 
@@ -611,11 +560,11 @@ mod tests {
     /// Window manager that enforces that `active_window` is queried before
     /// `move_window_to_workspace`. This models the requirement that
     /// `MoveWindowAndGo` must take the currently focused monitor into account
-    /// when deciding which workspace id to move the window to.
+    /// when deciding which workspace to move the window to.
     #[derive(Debug, Default)]
     struct OrderCheckingWm {
-        switches: RefCell<Vec<(String, i32)>>,
-        moves: RefCell<Vec<i32>>,
+        switches: RefCell<Vec<(String, GridPosition)>>,
+        moves: RefCell<Vec<GridPosition>>,
         active_monitor_queried_before_move: RefCell<bool>,
     }
 
@@ -645,18 +594,18 @@ mod tests {
             ])
         }
 
-        fn switch_workspace(&self, mon: &str, ws: i32) -> Result<(), OrderCheckingErr> {
-            self.switches.borrow_mut().push((mon.into(), ws));
+        fn switch_workspace(&self, mon: &str, pos: GridPosition) -> Result<(), OrderCheckingErr> {
+            self.switches.borrow_mut().push((mon.into(), pos));
             Ok(())
         }
 
-        fn move_window_to_workspace(&self, ws: i32) -> Result<(), OrderCheckingErr> {
+        fn move_window_to_workspace(&self, _ : &str, pos: GridPosition) -> Result<(), OrderCheckingErr> {
             // Fail if we have not yet queried the active monitor; `MoveWindowAndGo`
-            // must know which monitor is focused before choosing a workspace id.
+            // must know which monitor is focused before choosing a workspace position.
             if !*self.active_monitor_queried_before_move.borrow() {
                 return Err(OrderCheckingErr);
             }
-            self.moves.borrow_mut().push(ws);
+            self.moves.borrow_mut().push(pos);
             Ok(())
         }
 
@@ -689,11 +638,11 @@ mod tests {
         let switches = s.wm.switches.borrow();
         // Two monitors should each have received a switch call
         assert_eq!(switches.len(), 2);
-        // They should reference the same pair of workspace ids (from cell (1,0))
-        let ids: Vec<i32> = switches.iter().map(|(_, id)| *id).collect();
-        assert_eq!(ids.len(), 2);
-        // Ids are different (one per monitor)
-        assert_ne!(ids[0], ids[1]);
+        // They should have the same position
+        let positions: Vec<GridPosition> = switches.iter().map(|(_, pos)| *pos).collect();
+        assert_eq!(positions.len(), 2);
+        // positions per monitor are the same
+        assert_eq!(positions[0], positions[1]);
     }
 
     #[test]

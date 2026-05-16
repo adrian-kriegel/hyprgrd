@@ -6,6 +6,7 @@
 //! discovery.
 
 use crate::command::{MonitorInfo, WindowInfo};
+use crate::common::GridPosition;
 use crate::traits::WindowManager;
 use serde::Deserialize;
 use std::io::{Read, Write};
@@ -125,6 +126,11 @@ fn monitor_name_by_id(id: i64) -> Result<String, HyprlandWmError> {
         .ok_or_else(|| HyprlandWmError(format!("unknown monitor id: {}", id)))
 }
 
+/// Generate a unique name for a workspace from the monitor name and grid position
+fn workspace_name(monitor: &str, position: GridPosition) -> String {
+    format!("{}-{}-{}", monitor, position.col, position.row)
+}
+
 //  WindowManager implementation 
 
 impl WindowManager for HyprlandWm {
@@ -146,18 +152,30 @@ impl WindowManager for HyprlandWm {
             .collect())
     }
 
-    fn switch_workspace(&self, monitor: &str, workspace_id: i32) -> Result<(), Self::Error> {
-        // Hyprland dispatches are global — we focus the target monitor first,
-        // then switch.
+    fn switch_workspace(&self, monitor: &str, position: GridPosition) -> Result<(), Self::Error> {
+        let workspace = workspace_name(monitor, position);
+
+        // Hyprland dispatches are global. We need to focus the target monitor first,
+        // then switch to the named workspace scoped to that monitor.
         ipc_dispatch(&format!("focusmonitor {}", monitor))?;
-        // Keep the switch scoped to the monitor we just focused, even if the
-        // workspace currently "belongs" to a different monitor (e.g. after DPMS/off-on).
-        ipc_dispatch(&format!("focusworkspaceoncurrentmonitor {}", workspace_id))?;
+
+        // Named workspace format: <monitor>-<col>-<row>
+        ipc_dispatch(&format!(
+            "focusworkspaceoncurrentmonitor name:{}",
+            workspace
+        ))?;
+
         Ok(())
     }
 
-    fn move_window_to_workspace(&self, workspace_id: i32) -> Result<(), Self::Error> {
-        ipc_dispatch(&format!("movetoworkspace {}", workspace_id))
+    fn move_window_to_workspace(
+        &self,
+        monitor: &str,
+        position: GridPosition,
+    ) -> Result<(), Self::Error> {
+        let workspace = workspace_name(monitor, position);
+
+        ipc_dispatch(&format!("movetoworkspace name:{}", workspace))
     }
 
     fn move_window_to_monitor(&self, monitor: &str) -> Result<(), Self::Error> {

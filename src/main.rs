@@ -58,6 +58,7 @@ fn css_path() -> std::path::PathBuf {
 #[cfg(feature = "visualizer-gtk")]
 mod noop_wm {
     use hyprgrd::command::{MonitorInfo, WindowInfo};
+    use hyprgrd::common::GridPosition;
     use hyprgrd::traits::WindowManager;
 
     pub struct NoopWm;
@@ -79,11 +80,11 @@ mod noop_wm {
             }])
         }
 
-        fn switch_workspace(&self, _: &str, _: i32) -> Result<(), NoopWmError> {
+        fn switch_workspace(&self, _: &str, _: GridPosition) -> Result<(), NoopWmError> {
             Ok(())
         }
 
-        fn move_window_to_workspace(&self, _: i32) -> Result<(), NoopWmError> {
+        fn move_window_to_workspace(&self, _ : &str, _: GridPosition) -> Result<(), NoopWmError> {
             Ok(())
         }
 
