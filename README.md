@@ -2,16 +2,6 @@
 
 A grid-based workspace switcher for Hyprland.
 
-# TODO
-
-  1. Touchpad gestures seem to be broken. I think the issue is that hyprgrd still assumes gestures.workspace_swipe exists which is no longer supported in favor of newer gesture configs. 
-  2. When switching workspaces, the mouse cursor will sometimes focus a different display. It should still focus the display it focused before switching. 
-  3. The "movego" command does not trigger the visualizer but should.
-  4. The "movego" command will sometimes move the focused window to a different monitor.
-  5. "movego" seems to be pretty unstable in general. 
-  6. Add some way of attaching to the stdout of the daemon process when run through hyprland exec-once
-  7. The visualize does not show on the focused display. This should be configurable in the config "show on focused display" and "show on all displays" 
-
 ## Sending commands
 
 Connect to the Unix socket and write newline-delimited JSON. Each line is one command.
@@ -21,7 +11,7 @@ Connect to the Unix socket and write newline-delimited JSON. Each line is one co
 | Command | JSON | Effect |
 |---|---|---|
 | Go in a direction | `{"Go":"Right"}` | Move one grid cell right (also `Left`, `Up`, `Down`) |
-| Switch to absolute position | `{"SwitchTo":{"x":2,"y":1}}` | Jump to column 2, row 1 (0-indexed) |
+| Switch to absolute position | `{"SwitchTo":"2 1"}` | Jump to column 2, row 1 (0-indexed) |
 | Move window and go | `{"MoveWindowAndGo":"Left"}` | Carry the focused window one cell left |
 | Move window to monitor | `{"MoveWindowToMonitor":"Right"}` | Move focused window to the monitor in the given direction |
 | Move window to monitor N | `{"MoveWindowToMonitorIndex":1}` | Move focused window to monitor at index N (0-based) |
