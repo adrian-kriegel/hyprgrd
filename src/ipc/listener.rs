@@ -1,21 +1,23 @@
 //! Unix-socket [`CommandSource`] implementation.
 //!
 //! Binds a Unix stream socket and accepts one connection at a time.
-//! Each line received is parsed as a JSON-encoded [`Command`].
+//! Each line received is parsed as a JSON-encoded [`WireCommand`](crate::command::wire::WireCommand)
+//! and converted into a domain [`Command`].
 //!
 //! # Wire format
 //!
 //! Every message is a single line of JSON followed by `\n`:
 //!
 //! ```json
-//! {"Go":"Right"}
-//! {"SwitchTo":{"col":2,"row":1}}
+//! {"Go":"right"}
+//! {"SwitchTo":"2 1"}
 //! {"PrepareMove":{"dx":0.5,"dy":-0.3}}
 //! "CancelMove"
 //! {"CommitMove":"Down"}
 //! {"MoveWindowAndGo":"Left"}
 //! ```
 
+use crate::command::wire::WireCommand;
 use crate::command::Command;
 use crate::traits::CommandSource;
 use log::{debug, error, info};
@@ -39,8 +41,6 @@ pub struct UnixSocketListener {
 pub enum UnixSocketError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("json parse error: {0}")]
-    Json(#[from] serde_json::Error),
 }
 
 impl UnixSocketListener {
@@ -81,7 +81,7 @@ impl CommandSource for UnixSocketListener {
                     for line in reader.lines() {
                         match line {
                             Ok(ref text) if text.trim().is_empty() => continue,
-                            Ok(text) => match serde_json::from_str::<Command>(&text) {
+                            Ok(text) => match WireCommand::parse_line(&text) {
                                 Ok(cmd) => {
                                     debug!("received {:?}", cmd);
                                     if sink.send(cmd).is_err() {
@@ -153,8 +153,8 @@ mod tests {
         // Connect and send commands.
         {
             let mut stream = UnixStream::connect(&path).expect("connect");
-            writeln!(stream, r#"{{"Go":"Right"}}"#).unwrap();
-            writeln!(stream, r#"{{"SwitchTo":{{"col":2,"row":1}}}}"#).unwrap();
+            writeln!(stream, r#"{{"Go":"right"}}"#).unwrap();
+            writeln!(stream, r#"{{"SwitchTo":"2 1"}}"#).unwrap();
             writeln!(stream, r#""CancelMove""#).unwrap();
             stream.shutdown(std::net::Shutdown::Write).unwrap();
         }
@@ -191,7 +191,7 @@ mod tests {
         {
             let mut stream = UnixStream::connect(&path).expect("connect");
             writeln!(stream, "not json at all").unwrap();
-            writeln!(stream, r#"{{"Go":"Right"}}"#).unwrap();
+            writeln!(stream, r#"{{"Go":"right"}}"#).unwrap();
             stream.shutdown(std::net::Shutdown::Write).unwrap();
         }
 

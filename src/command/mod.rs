@@ -5,12 +5,12 @@
 //! and [`Direction`] / [`MonitorInfo`] / [`WindowInfo`] provide
 //! the supporting data types.
 //!
-//! The plugin forwards raw arguments; the daemon parses direction strings
-//! (e.g. "right", "up-left"), SwitchTo ("col row" or `{"col", "row"}`), and
-//! MoveWindowToMonitorIndex (number or string).
+//! The plugin forwards raw JSON payloads into [`wire::WireCommand`]; each wire
+//! type converts into the validated [`Command`] used by the switcher.
 
-use serde::de::Error as DeError;
-use serde::{Deserialize, Deserializer, Serialize};
+pub mod wire;
+
+use serde::Serialize;
 use std::fmt;
 
 use crate::common::GridPosition;
@@ -43,38 +43,7 @@ impl fmt::Display for Direction {
     }
 }
 
-/// Parse a direction string (case-insensitive; accepts "right", "up-left", "UpLeft", etc.).
-fn parse_direction(s: &str) -> Option<Direction> {
-    let normalized: String = s
-        .trim()
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != '_')
-        .flat_map(|c| c.to_lowercase())
-        .collect();
-    match normalized.as_str() {
-        "left" => Some(Direction::Left),
-        "right" => Some(Direction::Right),
-        "up" => Some(Direction::Up),
-        "down" => Some(Direction::Down),
-        "upleft" | "up-left" => Some(Direction::UpLeft),
-        "upright" | "up-right" => Some(Direction::UpRight),
-        "downleft" | "down-left" => Some(Direction::DownLeft),
-        "downright" | "down-right" => Some(Direction::DownRight),
-        _ => None,
-    }
-}
-
-impl<'de> Deserialize<'de> for Direction {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        parse_direction(&s).ok_or_else(|| DeError::custom(format!("invalid direction: {:?}", s)))
-    }
-}
-
-/// Wire format for [`Command::SwitchTo`]: accepts `{"col":0,"row":0}` or `"col row"`.
+/// Absolute grid position for [`Command::SwitchTo`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SwitchTo {
     pub col: usize,
@@ -98,86 +67,15 @@ impl SwitchTo {
     }
 }
 
-impl<'de> Deserialize<'de> for SwitchTo {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Visitor;
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = SwitchTo;
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "object {{col, row}} or string \"col row\"")
-            }
-            fn visit_map<A>(self, mut map: A) -> Result<SwitchTo, A::Error>
-            where
-                A: serde::de::MapAccess<'de>,
-            {
-                let mut col = None;
-                let mut row = None;
-                while let Some(k) = map.next_key::<String>()? {
-                    match k.as_str() {
-                        "col" => col = Some(map.next_value()?),
-                        "row" => row = Some(map.next_value()?),
-                        _ => {
-                            let _: serde::de::IgnoredAny = map.next_value()?;
-                        }
-                    }
-                }
-                let col = col.ok_or_else(|| DeError::missing_field("col"))?;
-                let row = row.ok_or_else(|| DeError::missing_field("row"))?;
-                Ok(SwitchTo::new(col, row))
-            }
-            fn visit_str<E>(self, s: &str) -> Result<SwitchTo, E>
-            where
-                E: DeError,
-            {
-                let pos = GridPosition::from_col_row_string(s)
-                    .map_err(DeError::custom)?;
-                Ok(SwitchTo::from_grid_position(pos))
-            }
-        }
-        deserializer.deserialize_any(V)
-    }
-}
-
-/// Wire format for MoveWindowToMonitorIndex: accepts number or string (daemon parses).
+/// Monitor index for [`Command::MoveWindowToMonitorIndex`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MonitorIndex(pub usize);
-
-impl<'de> Deserialize<'de> for MonitorIndex {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Visitor;
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = MonitorIndex;
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "non-negative integer or string")
-            }
-            fn visit_u64<E>(self, n: u64) -> Result<MonitorIndex, E> {
-                Ok(MonitorIndex(n as usize))
-            }
-            fn visit_str<E>(self, s: &str) -> Result<MonitorIndex, E>
-            where
-                E: DeError,
-            {
-                let n: usize = s.trim().parse().map_err(|_| DeError::custom("MoveWindowToMonitorIndex: expected non-negative integer"))?;
-                Ok(MonitorIndex(n))
-            }
-        }
-        deserializer.deserialize_any(V)
-    }
-}
 
 /// Every action the grid switcher can perform.
 ///
 /// Commands are produced by [`CommandSource`](crate::traits::CommandSource)
 /// implementations and consumed by the [`GridSwitcher`](crate::switcher::GridSwitcher).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Command {
     /// Switch all monitors to workspace at absolute grid position.
     SwitchTo(SwitchTo),
@@ -329,16 +227,6 @@ mod tests {
         assert_eq!(Direction::UpRight.to_string(), "up-right");
         assert_eq!(Direction::DownLeft.to_string(), "down-left");
         assert_eq!(Direction::DownRight.to_string(), "down-right");
-    }
-
-    #[test]
-    fn grid_position_from_col_row_string() {
-        assert_eq!(
-            GridPosition::from_col_row_string("2 1").unwrap(),
-            GridPosition::from_coords(2, 1)
-        );
-        assert!(GridPosition::from_col_row_string("-1 0").is_err());
-        assert!(GridPosition::from_col_row_string("0").is_err());
     }
 
     #[test]

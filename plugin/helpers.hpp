@@ -6,8 +6,9 @@
 #pragma once
 
 #include <cctype>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
-#include <sstream>
 #include <string>
 
 //  String helpers 
@@ -37,15 +38,11 @@ inline std::string socketPath() {
 }
 
 //  Command builders 
-//
-// Each builder validates its input and returns either a JSON payload string
-// or an error message.  The dispatchers in main.cpp wrap these results into
-// the Hyprland-specific SDispatchResult type.
 
 /// Result of building a dispatcher command.
 struct CommandResult {
     bool        ok;
-    std::string value; ///< JSON payload if `ok`, error message otherwise.
+    std::string value; ///< JSON payload.
 };
 
 /// Escape a string for use as a JSON string value (backslash and quote).
@@ -60,37 +57,29 @@ inline std::string escapeJsonString(const std::string& s) {
     return out;
 }
 
-/// Build the JSON for `hyprgrd:go <direction>`. Forwards the raw argument;
-/// daemon parses and validates.
+/// Build the JSON for `hyprgrd:go <direction>`.
 inline CommandResult buildGoJson(const std::string& arg) {
-    std::string s = escapeJsonString(trim(arg));
-    return {true, "{\"Go\":\"" + s + "\"}"};
+    return {true, "{\"Go\":\"" + escapeJsonString(arg) + "\"}"};
 }
 
-/// Build the JSON for `hyprgrd:movego <direction>`. Forwards the raw argument.
+/// Build the JSON for `hyprgrd:movego <direction>`.
 inline CommandResult buildMoveGoJson(const std::string& arg) {
-    std::string s = escapeJsonString(trim(arg));
-    return {true, "{\"MoveWindowAndGo\":\"" + s + "\"}"};
+    return {true, "{\"MoveWindowAndGo\":\"" + escapeJsonString(arg) + "\"}"};
 }
 
-/// Build the JSON for `hyprgrd:switch <col> <row>`. Forwards the raw argument
-/// (e.g. "0 0"); daemon parses.
+/// Build the JSON for `hyprgrd:switch <col> <row>`.
 inline CommandResult buildSwitchJson(const std::string& arg) {
-    std::string s = escapeJsonString(trim(arg));
-    return {true, "{\"SwitchTo\":\"" + s + "\"}"};
+    return {true, "{\"SwitchTo\":\"" + escapeJsonString(arg) + "\"}"};
 }
 
-/// Build the JSON for `hyprgrd:movetomonitor <direction>`. Forwards the raw argument.
+/// Build the JSON for `hyprgrd:movetomonitor <direction>`.
 inline CommandResult buildMoveToMonitorJson(const std::string& arg) {
-    std::string s = escapeJsonString(trim(arg));
-    return {true, "{\"MoveWindowToMonitor\":\"" + s + "\"}"};
+    return {true, "{\"MoveWindowToMonitor\":\"" + escapeJsonString(arg) + "\"}"};
 }
 
-/// Build the JSON for `hyprgrd:movetomonitorindex <n>`. Forwards the raw argument;
-/// daemon parses.
+/// Build the JSON for `hyprgrd:movetomonitorindex <n>`.
 inline CommandResult buildMoveToMonitorIndexJson(const std::string& arg) {
-    std::string s = escapeJsonString(trim(arg));
-    return {true, "{\"MoveWindowToMonitorIndex\":\"" + s + "\"}"};
+    return {true, "{\"MoveWindowToMonitorIndex\":\"" + escapeJsonString(arg) + "\"}"};
 }
 
 //  Swipe event builders (sent by the swipe hooks) 
@@ -106,7 +95,6 @@ inline std::string buildSwipeBeginJson(uint32_t fingers) {
 ///
 /// Produces: `{"SwipeUpdate":{"fingers":3,"dx":10.5,"dy":-2.3}}`
 inline std::string buildSwipeUpdateJson(uint32_t fingers, double dx, double dy) {
-    // Use enough precision for sub-pixel deltas.
     char buf[256];
     snprintf(buf, sizeof(buf),
              R"({"SwipeUpdate":{"fingers":%u,"dx":%.6f,"dy":%.6f}})",
@@ -120,4 +108,3 @@ inline std::string buildSwipeUpdateJson(uint32_t fingers, double dx, double dy) 
 inline std::string buildSwipeEndJson() {
     return "\"SwipeEnd\"";
 }
-

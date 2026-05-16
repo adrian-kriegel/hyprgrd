@@ -145,12 +145,6 @@ TEST(go_json_forwards_arg) {
     ASSERT_EQ(r.value, std::string(R"({"Go":"right"})"));
 }
 
-TEST(go_json_trimmed) {
-    auto r = buildGoJson("  left  ");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"Go":"left"})"));
-}
-
 TEST(go_json_forwards_any_string) {
     auto r = buildGoJson("diagonal");
     ASSERT_TRUE(r.ok);
@@ -173,12 +167,6 @@ TEST(movego_json_forwards_arg) {
     ASSERT_EQ(r.value, std::string(R"({"MoveWindowAndGo":"right"})"));
 }
 
-TEST(movego_json_trimmed) {
-    auto r = buildMoveGoJson("\tup\n");
-    ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowAndGo":"up"})"));
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // buildSwitchJson() — forwards raw arg; daemon parses "col row".
 // ═══════════════════════════════════════════════════════════════════════════
@@ -189,10 +177,10 @@ TEST(switch_json_forwards_arg) {
     ASSERT_EQ(r.value, std::string(R"({"SwitchTo":"0 0"})"));
 }
 
-TEST(switch_json_trimmed) {
+TEST(switch_json_forwards_whitespace_unchanged) {
     auto r = buildSwitchJson("  2   1  ");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":"2   1"})"));
+    ASSERT_EQ(r.value, std::string(R"({"SwitchTo":"  2   1  "})"));
 }
 
 TEST(switch_json_forwards_any_string) {
@@ -217,10 +205,10 @@ TEST(movetomonitor_json_up) {
     ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":"up"})"));
 }
 
-TEST(movetomonitor_json_trimmed) {
+TEST(movetomonitor_json_forwards_whitespace_unchanged) {
     auto r = buildMoveToMonitorJson("  right  ");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":"right"})"));
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitor":"  right  "})"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -233,10 +221,10 @@ TEST(movetomonitorindex_json_forwards_arg) {
     ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":"0"})"));
 }
 
-TEST(movetomonitorindex_json_trimmed) {
+TEST(movetomonitorindex_json_forwards_whitespace_unchanged) {
     auto r = buildMoveToMonitorIndexJson("  3  ");
     ASSERT_TRUE(r.ok);
-    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":"3"})"));
+    ASSERT_EQ(r.value, std::string(R"({"MoveWindowToMonitorIndex":"  3  "})"));
 }
 
 TEST(movetomonitorindex_json_forwards_any_string) {
