@@ -9,7 +9,7 @@
 //! Mapping a cell to concrete workspace ids for individual monitors is handled
 //! by higher-level orchestration code (see `switcher.rs`).
 
-use crate::command::Direction;
+use crate::{command::Direction, common::GridPosition};
 
 /// A dynamic grid of workspaces.
 ///
@@ -36,16 +36,12 @@ impl Grid {
     }
 
     /// Compute the absolute target position when moving one step in `direction`
-    /// from `(col, row)`.
+    /// from `pos`.
     ///
     /// Pure: no mutation. Left/up at edge stay in place; right/down extend
     /// by one column/row.
-    pub fn get_abs_from(
-        direction: Direction,
-        col: usize,
-        row: usize,
-    ) -> (usize, usize) {
-        let (mut c, mut r) = (col, row);
+    pub fn get_abs_from(direction: Direction, pos: GridPosition) -> GridPosition {
+        let (mut c, mut r) = (pos.col, pos.row);
         match direction {
             Direction::Left => {
                 if c > 0 {
@@ -84,16 +80,16 @@ impl Grid {
                 r += 1;
             }
         }
-        (c, r)
+        GridPosition { col: c, row: r }
     }
 
-    /// Grow the grid to contain `(col, row)` if needed.
-    pub fn grow_to_contain(&mut self, col: usize, row: usize) {
-        if col >= self.cols {
-            self.cols = col + 1;
+    /// Grow the grid to contain `pos` if needed.
+    pub fn grow_to_contain(&mut self, pos: GridPosition) {
+        if pos.col >= self.cols {
+            self.cols = pos.col + 1;
         }
-        if row >= self.rows {
-            self.rows = row + 1;
+        if pos.row >= self.rows {
+            self.rows = pos.row + 1;
         }
     }
 }
@@ -112,39 +108,39 @@ mod tests {
 
     #[test]
     fn get_abs_from_right() {
-        let target = Grid::get_abs_from(Direction::Right, 0, 0);
-        assert_eq!(target, (1, 0));
+        let target = Grid::get_abs_from(Direction::Right, GridPosition::ORIGIN);
+        assert_eq!(target, GridPosition { col: 1, row: 0 });
     }
 
     #[test]
     fn get_abs_from_down() {
-        let target = Grid::get_abs_from(Direction::Down, 0, 0);
-        assert_eq!(target, (0, 1));
+        let target = Grid::get_abs_from(Direction::Down, GridPosition::ORIGIN);
+        assert_eq!(target, GridPosition { col: 0, row: 1 });
     }
 
     #[test]
     fn get_abs_from_left_at_origin_stays() {
-        let target = Grid::get_abs_from(Direction::Left, 0, 0);
-        assert_eq!(target, (0, 0));
+        let target = Grid::get_abs_from(Direction::Left, GridPosition::ORIGIN);
+        assert_eq!(target, GridPosition::ORIGIN);
     }
 
     #[test]
     fn get_abs_from_up_at_origin_stays() {
-        let target = Grid::get_abs_from(Direction::Up, 0, 0);
-        assert_eq!(target, (0, 0));
+        let target = Grid::get_abs_from(Direction::Up, GridPosition::ORIGIN);
+        assert_eq!(target, GridPosition::ORIGIN);
     }
 
     #[test]
     fn grow_to_contain_expands_dimensions() {
         let mut g = Grid::new();
-        g.grow_to_contain(3, 2);
+        g.grow_to_contain(GridPosition { col: 3, row: 2 });
         assert_eq!(g.dimensions(), (4, 3));
     }
 
     #[test]
     fn grow_to_contain_idempotent_for_existing_cell() {
         let mut g = Grid::new();
-        g.grow_to_contain(0, 0);
+        g.grow_to_contain(GridPosition::ORIGIN);
         assert_eq!(g.dimensions(), (1, 1));
     }
 }

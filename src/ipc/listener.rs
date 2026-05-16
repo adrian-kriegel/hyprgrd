@@ -9,7 +9,7 @@
 //!
 //! ```json
 //! {"Go":"Right"}
-//! {"SwitchTo":{"x":2,"y":1}}
+//! {"SwitchTo":{"col":2,"row":1}}
 //! {"PrepareMove":{"dx":0.5,"dy":-0.3}}
 //! "CancelMove"
 //! {"CommitMove":"Down"}
@@ -154,7 +154,7 @@ mod tests {
         {
             let mut stream = UnixStream::connect(&path).expect("connect");
             writeln!(stream, r#"{{"Go":"Right"}}"#).unwrap();
-            writeln!(stream, r#"{{"SwitchTo":{{"x":2,"y":1}}}}"#).unwrap();
+            writeln!(stream, r#"{{"SwitchTo":{{"col":2,"row":1}}}}"#).unwrap();
             writeln!(stream, r#""CancelMove""#).unwrap();
             stream.shutdown(std::net::Shutdown::Write).unwrap();
         }
@@ -165,7 +165,10 @@ mod tests {
 
         assert_eq!(cmds.len(), 3);
         assert_eq!(cmds[0], Command::Go(Direction::Right));
-        assert_eq!(cmds[1], Command::SwitchTo(crate::command::SwitchToTarget { x: 2, y: 1 }));
+        assert_eq!(
+            cmds[1],
+            Command::SwitchTo(crate::command::SwitchTo::new(2, 1))
+        );
         assert_eq!(cmds[2], Command::CancelMove);
 
         // Clean up.

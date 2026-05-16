@@ -4,7 +4,10 @@
 //! [`GridSwitcher`] owns the [`Grid`] and reacts to [`Command`]s by updating
 //! the grid state and issuing calls to the [`WindowManager`] trait.
 
-use crate::command::{find_monitor_in_direction, Command, Direction, MonitorIndex, SwitchToTarget};
+use crate::command::{
+    find_monitor_in_direction, Command, Direction, MonitorIndex, SwitchTo,
+};
+use crate::common::GridPosition;
 use crate::grid::Grid;
 use crate::hyprland::gestures::{dominant_direction, normalised_swipe_offset, GestureConfig};
 use crate::traits::{VisualizerEvent, VisualizerShowPayload, VisualizerState, WindowManager};
@@ -31,8 +34,7 @@ struct ActiveSwipe {
 #[derive(Debug, Clone)]
 pub struct MonitorGridPosition {
     pub name: String,
-    pub col: usize,
-    pub row: usize,
+    pub grid_position: GridPosition,
 }
 
 /// Orchestrates grid navigation and window-manager calls.
@@ -66,8 +68,7 @@ impl<W: WindowManager> GridSwitcher<W> {
             .into_iter()
             .map(|name| MonitorGridPosition {
                 name,
-                col: 0,
-                row: 0,
+                grid_position: GridPosition::ORIGIN,
             })
             .collect();
 
@@ -114,12 +115,12 @@ impl<W: WindowManager> GridSwitcher<W> {
         &self.grid
     }
 
-    /// Current grid position `(col, row)`. All monitors share this position.
-    pub fn position(&self) -> (usize, usize) {
+    /// Current grid position. All monitors share this position.
+    pub fn position(&self) -> GridPosition {
         self.monitor_positions
             .first()
-            .map(|p| (p.col, p.row))
-            .unwrap_or((0, 0))
+            .map(|p| p.grid_position)
+            .unwrap_or(GridPosition::ORIGIN)
     }
 
     /// Return the name of the currently focused monitor, or `None` if no
@@ -149,12 +150,12 @@ impl<W: WindowManager> GridSwitcher<W> {
     /// retry or recovery strategy is left to the caller.
     pub fn handle(&mut self, cmd: Command) -> Result<(), SwitcherError> {
         match cmd {
-            Command::SwitchTo(SwitchToTarget { x, y }) => {
-                info!("switch to ({}, {})", x, y);
-                self.grid.grow_to_contain(x, y);
-                for pos in &mut self.monitor_positions {
-                    pos.col = x;
-                    pos.row = y;
+            Command::SwitchTo(target) => {
+                let pos = target.grid_position();
+                info!("switch to ({}, {})", pos.col, pos.row);
+                self.grid.grow_to_contain(pos);
+                for mp in &mut self.monitor_positions {
+                    mp.grid_position = pos;
                 }
                 // Always apply so re-sending current cell or clicking it can repair desync.
                 if let Err(e) = self.apply_current_workspace() {
@@ -226,8 +227,9 @@ impl<W: WindowManager> GridSwitcher<W> {
 
             Command::CancelMove => {
                 debug!("cancel move — switch to current workspace");
-                let (col, row) = self.position();
-                return self.handle(Command::SwitchTo(SwitchToTarget { x: col, y: row }));
+                return self.handle(Command::SwitchTo(SwitchTo::from_grid_position(
+                    self.position(),
+                )));
             }
 
             Command::CommitMove(dir) => {
@@ -304,8 +306,9 @@ impl<W: WindowManager> GridSwitcher<W> {
                         }
                         None => {
                             debug!("swipe cancel (below threshold) — switch to current workspace");
-                            let (col, row) = self.position();
-                            self.handle(Command::SwitchTo(SwitchToTarget { x: col, y: row }))?;
+                            self.handle(Command::SwitchTo(SwitchTo::from_grid_position(
+                                self.position(),
+                            )))?;
                         }
                     }
                 }
@@ -359,16 +362,16 @@ impl<W: WindowManager> GridSwitcher<W> {
     /// offset reaches the commit threshold (same as "release to switch").
     pub fn visualizer_state(&self, offset_x: f64, offset_y: f64) -> VisualizerState {
         let (cols, rows) = self.grid.dimensions();
-        let (col, row) = self.position();
+        let position = self.position();
         let target_cell = dominant_direction(
             offset_x,
             offset_y,
             self.gesture_config.commit_threshold,
         )
-        .map(|dir| Grid::get_abs_from(dir, col, row));
+        .map(|dir| Grid::get_abs_from(dir, position));
         VisualizerState {
             target_cell,
-            ..VisualizerState::new(cols, rows, col, row, offset_x, offset_y)
+            ..VisualizerState::new(cols, rows, position, offset_x, offset_y)
         }
     }
 
@@ -386,7 +389,7 @@ impl<W: WindowManager> GridSwitcher<W> {
     /// Tell the window manager to switch every monitor to the workspace ids
     /// derived from the current grid cell.
     fn apply_current_workspace(&self) -> Result<(), SwitcherError> {
-        let (col, row) = self.position();
+        let position = self.position();
 
         let active = self.
             active_monitor()?;
@@ -398,7 +401,7 @@ impl<W: WindowManager> GridSwitcher<W> {
             .map(|(idx, p)| {
                 (
                     p.name.as_str(),
-                    Self::compute_workspace_id(col, row, idx, self.monitor_positions.len()),
+                    Self::compute_workspace_id(position, idx, self.monitor_positions.len()),
                 )
             })
             .collect();
@@ -436,12 +439,10 @@ impl<W: WindowManager> GridSwitcher<W> {
 
     /// Core logic for a discrete workspace move in a direction.
     fn go(&mut self, dir: Direction) -> Result<(), SwitcherError> {
-        let (col, row) = self.position();
-        let (col, row) = Grid::get_abs_from(dir, col, row);
-        self.grid.grow_to_contain(col, row);
-        for pos in &mut self.monitor_positions {
-            pos.col = col;
-            pos.row = row;
+        let pos = Grid::get_abs_from(dir, self.position());
+        self.grid.grow_to_contain(pos);
+        for mp in &mut self.monitor_positions {
+            mp.grid_position = pos;
         }
         self.show_visualizer(0.0, 0.0);
         self.hide_visualizer();
@@ -450,8 +451,7 @@ impl<W: WindowManager> GridSwitcher<W> {
     }
 
     fn move_and_go(&mut self, dir : Direction) -> Result<(), SwitcherError> {
-        let (col, row) = self.position();
-        let (target_col, target_row) = Grid::get_abs_from(dir, col, row);
+        let target_pos = Grid::get_abs_from(dir, self.position());
 
         // Figure out which monitor is currently focused so we move
         // the window to the workspace slice for that monitor.
@@ -471,8 +471,7 @@ impl<W: WindowManager> GridSwitcher<W> {
             })?;
 
         let target_ws = Self::compute_workspace_id(
-            target_col,
-            target_row,
+            target_pos,
             active_index,
             self.monitor_positions.len(),
         );
@@ -492,13 +491,12 @@ impl<W: WindowManager> GridSwitcher<W> {
     /// offsets by the monitor index so that every `(col, row, monitor_index)`
     /// triple receives a unique, stable id.
     fn compute_workspace_id(
-        col: usize,
-        row: usize,
+        pos: GridPosition,
         monitor_index: usize,
         monitor_count: usize,
     ) -> i32 {
-        let col = col as i64;
-        let row = row as i64;
+        let col = pos.col as i64;
+        let row = pos.row as i64;
         let monitor_index = monitor_index as i64;
         let monitor_count = monitor_count as i64;
 
@@ -815,8 +813,8 @@ mod tests {
     #[test]
     fn switch_to_absolute() {
         let mut s = make_switcher();
-        s.handle(Command::SwitchTo(SwitchToTarget { x: 2, y: 1 })).unwrap();
-        assert_eq!(s.position(), (2, 1));
+        s.handle(Command::SwitchTo(SwitchTo::new(2, 1))).unwrap();
+        assert_eq!(s.position(), GridPosition { col: 2, row: 1 });
         assert_eq!(s.grid().dimensions(), (3, 2));
     }
 
@@ -826,7 +824,7 @@ mod tests {
         s.handle(Command::MoveWindowAndGo(Direction::Right)).unwrap();
         let moves = s.wm.moves.borrow();
         assert_eq!(moves.len(), 1, "should have moved one window");
-        assert_eq!(s.position(), (1, 0));
+        assert_eq!(s.position(), GridPosition { col: 1, row: 0 });
     }
 
     /// `MoveWindowAndGo` must determine the active monitor *before* deciding
@@ -853,21 +851,21 @@ mod tests {
         let mut s = make_switcher();
         s.handle(Command::PrepareMove { dx: 0.5, dy: 0.0 })
             .unwrap();
-        assert_eq!(s.position(), (0, 0), "grid should not move");
+        assert_eq!(s.position(), GridPosition::ORIGIN, "grid should not move");
     }
 
     #[test]
     fn cancel_move_does_not_change_grid() {
         let mut s = make_switcher();
         s.handle(Command::CancelMove).unwrap();
-        assert_eq!(s.position(), (0, 0));
+        assert_eq!(s.position(), GridPosition::ORIGIN);
     }
 
     #[test]
     fn commit_move_advances_grid() {
         let mut s = make_switcher();
         s.handle(Command::CommitMove(Direction::Down)).unwrap();
-        assert_eq!(s.position(), (0, 1));
+        assert_eq!(s.position(), GridPosition { col: 0, row: 1 });
     }
 
     #[test]
@@ -877,7 +875,7 @@ mod tests {
         s.handle(Command::Go(Direction::Down)).unwrap();
         s.handle(Command::Go(Direction::Left)).unwrap();
         s.handle(Command::Go(Direction::Up)).unwrap();
-        assert_eq!(s.position(), (0, 0));
+        assert_eq!(s.position(), GridPosition::ORIGIN);
         assert_eq!(s.grid().dimensions(), (2, 2));
     }
 
@@ -910,7 +908,7 @@ mod tests {
         let mut s = make_switcher();
         s.handle(Command::MoveWindowToMonitor(Direction::Right))
             .unwrap();
-        assert_eq!(s.position(), (0, 0), "grid should not move");
+        assert_eq!(s.position(), GridPosition::ORIGIN, "grid should not move");
     }
 
     //  MoveWindowToMonitorIndex tests 
@@ -944,7 +942,7 @@ mod tests {
     fn move_window_to_monitor_index_does_not_change_grid() {
         let mut s = make_switcher();
         s.handle(Command::MoveWindowToMonitorIndex(MonitorIndex(1))).unwrap();
-        assert_eq!(s.position(), (0, 0), "grid should not move");
+        assert_eq!(s.position(), GridPosition::ORIGIN, "grid should not move");
     }
 }
 

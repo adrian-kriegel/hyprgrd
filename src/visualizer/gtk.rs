@@ -28,7 +28,8 @@
 //! The `.grid-cursor` appearance is fully CSS-configurable.  Movement is
 //! code-driven; timing is controlled by [`VisualizerConfig`].
 
-use crate::command::{Command, MonitorInfo};
+use crate::command::{Command, MonitorInfo, SwitchTo};
+use crate::common::GridPosition;
 use crate::config::VisualizerConfig;
 use crate::traits::{VisualizerEvent, VisualizerState};
 use gtk4::prelude::*;
@@ -180,14 +181,14 @@ struct OverlayGrid {
     anim: Option<CursorAnim>,
     cursor_anim_dur: Duration,
     initialised: bool,
-    on_cell_click: Option<Rc<dyn Fn(usize, usize)>>,
+    on_cell_click: Option<Rc<dyn Fn(GridPosition)>>,
 }
 
 impl OverlayGrid {
     fn new(
         container: &gtk4::Box,
         config: &VisualizerConfig,
-        on_cell_click: Option<Rc<dyn Fn(usize, usize)>>,
+        on_cell_click: Option<Rc<dyn Fn(GridPosition)>>,
     ) -> Self {
         let overlay = gtk4::Overlay::new();
 
@@ -231,14 +232,14 @@ impl OverlayGrid {
         let is_gesture = state.offset_x != 0.0 || state.offset_y != 0.0;
         let effective_target = state
             .target_cell
-            .unwrap_or((state.col, state.row));
+            .unwrap_or(state.position);
         let display_cols = if is_gesture {
-            state.cols.max(effective_target.0 + 1)
+            state.cols.max(effective_target.col + 1)
         } else {
             state.cols
         };
         let display_rows = if is_gesture {
-            state.rows.max(effective_target.1 + 1)
+            state.rows.max(effective_target.row + 1)
         } else {
             state.rows
         };
@@ -249,8 +250,8 @@ impl OverlayGrid {
         }
         self.apply_classes(state);
 
-        let base_x = cell_px(state.col);
-        let base_y = cell_px(state.row);
+        let base_x = cell_px(state.position.col);
+        let base_y = cell_px(state.position.row);
         let (display_ox, display_oy) = interpolated_offset(state.offset_x, state.offset_y);
         let mut target_x = base_x + display_ox * CELL_PITCH as f64;
         let mut target_y = base_y + display_oy * CELL_PITCH as f64;
@@ -347,9 +348,9 @@ impl OverlayGrid {
                 if let Some(ref on_click) = self.on_cell_click {
                     let gesture = gtk4::GestureClick::new();
                     gesture.set_button(1); // left mouse button
-                    let cb: Rc<dyn Fn(usize, usize)> = Rc::clone(on_click);
+                    let cb: Rc<dyn Fn(GridPosition)> = Rc::clone(on_click);
                     gesture.connect_released(move |_, _, _, _| {
-                        cb(col, row);
+                        cb(GridPosition { col, row });
                     });
                     cell.add_controller(gesture);
                 }
@@ -363,18 +364,21 @@ impl OverlayGrid {
         let is_gesture = state.offset_x != 0.0 || state.offset_y != 0.0;
         let effective_target = state
             .target_cell
-            .unwrap_or((state.col, state.row));
+            .unwrap_or(state.position);
 
         let is_tobecreated_cell = is_gesture
-            && (effective_target.0 >= state.cols || effective_target.1 >= state.rows);
+            && (effective_target.col >= state.cols || effective_target.row >= state.rows);
 
         for row in 0..self.rows {
             for col in 0..self.cols {
                 let cell = &self.cells[row * self.cols + col];
-                let is_active = col == state.col && row == state.row;
-                let is_target = is_gesture && col == effective_target.0 && row == effective_target.1;
-                let is_tobecreated =
-                    is_tobecreated_cell && col == effective_target.0 && row == effective_target.1;
+                let is_active = col == state.position.col && row == state.position.row;
+                let is_target = is_gesture
+                    && col == effective_target.col
+                    && row == effective_target.row;
+                let is_tobecreated = is_tobecreated_cell
+                    && col == effective_target.col
+                    && row == effective_target.row;
 
                 if is_active {
                     cell.add_css_class("active");
@@ -476,14 +480,14 @@ pub fn run_main_loop(
     let shown_kind = Rc::new(Cell::new(ShownKind::Hidden));
     let current_shown: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
-    let on_cell_click: Rc<dyn Fn(usize, usize)> = {
+    let on_cell_click: Rc<dyn Fn(GridPosition)> = {
         let cmd_tx = cmd_tx.clone();
         let shown_kind = Rc::clone(&shown_kind);
-        Rc::new(move |col, row| {
+        Rc::new(move |pos| {
             if shown_kind.get() != ShownKind::ManuallyShown {
                 return;
             }
-            let cmd = Command::SwitchTo(crate::command::SwitchToTarget { x: col, y: row });
+            let cmd = Command::SwitchTo(SwitchTo::from_grid_position(pos));
             if let Err(e) = cmd_tx.send(cmd) {
                 error!(target: "hyprgrd::visualizer", "failed to dispatch cell click: {}", e);
             }
@@ -502,7 +506,10 @@ pub fn run_main_loop(
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<built-in>".into()),
-        initial_state.cols, initial_state.rows, initial_state.col, initial_state.row,
+        initial_state.cols,
+        initial_state.rows,
+        initial_state.position.col,
+        initial_state.position.row,
     );
 
     //  Main event loop (~60 fps)
@@ -538,7 +545,10 @@ pub fn run_main_loop(
                     debug!(
                         target: "hyprgrd::visualizer",
                         "SHOW_AUTO {}x{} pos=({},{}) off=({:.2},{:.2})",
-                        state.cols, state.rows, state.col, state.row,
+                        state.cols,
+                        state.rows,
+                        state.position.col,
+                        state.position.row,
                         state.offset_x, state.offset_y
                     );
                     show_on_target_monitor(
@@ -570,7 +580,10 @@ pub fn run_main_loop(
                             debug!(
                                 target: "hyprgrd::visualizer",
                                 "TOGGLE_MANUAL → show {}x{} pos=({},{})",
-                                state.cols, state.rows, state.col, state.row
+                                state.cols,
+                                state.rows,
+                                state.position.col,
+                                state.position.row
                             );
                             show_on_target_monitor(
                                 &overlays_for_loop,
@@ -721,7 +734,7 @@ fn monitor_cache_key(active_name: Option<&str>, monitor: Option<&gdk::Monitor>) 
 fn show_on_target_monitor(
     overlays: &Rc<RefCell<HashMap<String, MonitorOverlay>>>,
     current_shown: &Rc<RefCell<Option<String>>>,
-    on_cell_click: &Rc<dyn Fn(usize, usize)>,
+    on_cell_click: &Rc<dyn Fn(GridPosition)>,
     vis_config: &VisualizerConfig,
     active_monitor_name: &Option<String>,
     monitors: &[MonitorInfo],
@@ -781,7 +794,7 @@ fn show_on_target_monitor(
 fn build_monitor_overlay(
     monitor: Option<&gdk::Monitor>,
     key: &str,
-    on_cell_click: &Rc<dyn Fn(usize, usize)>,
+    on_cell_click: &Rc<dyn Fn(GridPosition)>,
     vis_config: &VisualizerConfig,
 ) -> MonitorOverlay {
     let window = gtk4::Window::new();

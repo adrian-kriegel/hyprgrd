@@ -6,12 +6,14 @@
 //! the supporting data types.
 //!
 //! The plugin forwards raw arguments; the daemon parses direction strings
-//! (e.g. "right", "up-left"), SwitchTo ("col row" or {"x", "y"}), and
+//! (e.g. "right", "up-left"), SwitchTo ("col row" or `{"col", "row"}`), and
 //! MoveWindowToMonitorIndex (number or string).
 
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
+
+use crate::common::GridPosition;
 
 /// Direction for grid navigation (cardinal and diagonal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -72,14 +74,31 @@ impl<'de> Deserialize<'de> for Direction {
     }
 }
 
-/// Wire format for SwitchTo: accepts `{"x":0,"y":0}` or `"col row"` (daemon parses).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct SwitchToTarget {
-    pub x: usize,
-    pub y: usize,
+/// Wire format for [`Command::SwitchTo`]: accepts `{"col":0,"row":0}` or `"col row"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SwitchTo {
+    pub col: usize,
+    pub row: usize,
 }
 
-impl<'de> Deserialize<'de> for SwitchToTarget {
+impl SwitchTo {
+    pub fn new(col: usize, row: usize) -> Self {
+        Self { col, row }
+    }
+
+    pub fn from_grid_position(pos: GridPosition) -> Self {
+        Self {
+            col: pos.col,
+            row: pos.row,
+        }
+    }
+    
+    pub fn grid_position(&self) -> GridPosition {
+        GridPosition::from_coords(self.col, self.row)
+    }
+}
+
+impl<'de> Deserialize<'de> for SwitchTo {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -87,39 +106,36 @@ impl<'de> Deserialize<'de> for SwitchToTarget {
         use serde::de::Visitor;
         struct V;
         impl<'de> Visitor<'de> for V {
-            type Value = SwitchToTarget;
+            type Value = SwitchTo;
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "object {{x, y}} or string \"col row\"")
+                write!(f, "object {{col, row}} or string \"col row\"")
             }
-            fn visit_map<A>(self, mut map: A) -> Result<SwitchToTarget, A::Error>
+            fn visit_map<A>(self, mut map: A) -> Result<SwitchTo, A::Error>
             where
                 A: serde::de::MapAccess<'de>,
             {
-                let mut x = None;
-                let mut y = None;
+                let mut col = None;
+                let mut row = None;
                 while let Some(k) = map.next_key::<String>()? {
                     match k.as_str() {
-                        "x" => x = Some(map.next_value()?),
-                        "y" => y = Some(map.next_value()?),
-                        _ => { let _: serde::de::IgnoredAny = map.next_value()?; }
+                        "col" => col = Some(map.next_value()?),
+                        "row" => row = Some(map.next_value()?),
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
                     }
                 }
-                Ok(SwitchToTarget {
-                    x: x.ok_or_else(|| DeError::missing_field("x"))?,
-                    y: y.ok_or_else(|| DeError::missing_field("y"))?,
-                })
+                let col = col.ok_or_else(|| DeError::missing_field("col"))?;
+                let row = row.ok_or_else(|| DeError::missing_field("row"))?;
+                Ok(SwitchTo::new(col, row))
             }
-            fn visit_str<E>(self, s: &str) -> Result<SwitchToTarget, E>
+            fn visit_str<E>(self, s: &str) -> Result<SwitchTo, E>
             where
                 E: DeError,
             {
-                let parts: Vec<&str> = s.trim().split_whitespace().collect();
-                if parts.len() != 2 {
-                    return Err(DeError::custom(format!("SwitchTo: expected \"col row\", got {:?}", s)));
-                }
-                let x: usize = parts[0].parse().map_err(|_| DeError::custom("SwitchTo: col must be a non-negative integer"))?;
-                let y: usize = parts[1].parse().map_err(|_| DeError::custom("SwitchTo: row must be a non-negative integer"))?;
-                Ok(SwitchToTarget { x, y })
+                let pos = GridPosition::from_col_row_string(s)
+                    .map_err(DeError::custom)?;
+                Ok(SwitchTo::from_grid_position(pos))
             }
         }
         deserializer.deserialize_any(V)
@@ -163,8 +179,8 @@ impl<'de> Deserialize<'de> for MonitorIndex {
 /// implementations and consumed by the [`GridSwitcher`](crate::switcher::GridSwitcher).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    /// Switch all monitors to workspace at absolute grid position `(x, y)`.
-    SwitchTo(SwitchToTarget),
+    /// Switch all monitors to workspace at absolute grid position.
+    SwitchTo(SwitchTo),
 
     /// Move one cell in the given direction, creating the column/row if needed.
     Go(Direction),
@@ -316,10 +332,26 @@ mod tests {
     }
 
     #[test]
+    fn grid_position_from_col_row_string() {
+        assert_eq!(
+            GridPosition::from_col_row_string("2 1").unwrap(),
+            GridPosition::from_coords(2, 1)
+        );
+        assert!(GridPosition::from_col_row_string("-1 0").is_err());
+        assert!(GridPosition::from_col_row_string("0").is_err());
+    }
+
+    #[test]
+    fn switch_to_grid_position_getter() {
+        let target = SwitchTo::new(3, 4);
+        assert_eq!(target.grid_position(), GridPosition::from_coords(3, 4));
+    }
+
+    #[test]
     fn command_equality() {
         assert_eq!(
-            Command::SwitchTo(SwitchToTarget { x: 1, y: 2 }),
-            Command::SwitchTo(SwitchToTarget { x: 1, y: 2 })
+            Command::SwitchTo(SwitchTo::new(1, 2)),
+            Command::SwitchTo(SwitchTo::new(1, 2))
         );
         assert_ne!(Command::Go(Direction::Left), Command::Go(Direction::Right));
         assert_eq!(

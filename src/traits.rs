@@ -5,7 +5,7 @@
 //! …) implements one of these traits.  The [`GridSwitcher`](crate::switcher::GridSwitcher)
 //! only depends on these abstractions.
 
-use crate::command::{Command, MonitorInfo, WindowInfo};
+use crate::{command::{Command, MonitorInfo, WindowInfo}, common::GridPosition};
 use std::sync::mpsc;
 
 /// Payload for visualizer events that show the overlay (ShowAuto, ToggleManual).
@@ -73,10 +73,8 @@ pub struct VisualizerState {
     pub cols: usize,
     /// Total rows in the grid.
     pub rows: usize,
-    /// Current column position (0-indexed).
-    pub col: usize,
-    /// Current row position (0-indexed).
-    pub row: usize,
+    /// Current grid cell.
+    pub position: GridPosition,
     /// Gesture offset on the X axis, normalised to `[-1.0, 1.0]`.
     /// `0.0` when no gesture is active.
     pub offset_x: f64,
@@ -85,17 +83,22 @@ pub struct VisualizerState {
     pub offset_y: f64,
     /// When sliding with the touchpad, the cell that would be switched to on
     /// release. Set only once the gesture has reached the commit threshold.
-    pub target_cell: Option<(usize, usize)>,
+    pub target_cell: Option<GridPosition>,
 }
 
 impl VisualizerState {
     /// Build a state snapshot from grid dimensions, position, and gesture offsets.
-    pub fn new(cols: usize, rows: usize, col: usize, row: usize, offset_x: f64, offset_y: f64) -> Self {
+    pub fn new(
+        cols: usize,
+        rows: usize,
+        position: GridPosition,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> Self {
         Self {
             cols,
             rows,
-            col,
-            row,
+            position,
             offset_x,
             offset_y,
             target_cell: None,
@@ -262,7 +265,7 @@ mod tests {
         let mut src = MockSource {
             commands: vec![
                 Command::Go(Direction::Right),
-                Command::SwitchTo(crate::command::SwitchToTarget { x: 2, y: 1 }),
+                Command::SwitchTo(crate::command::SwitchTo::new(2, 1)),
             ],
         };
         let (tx, rx) = mpsc::channel();
@@ -270,7 +273,10 @@ mod tests {
         let cmds: Vec<Command> = rx.try_iter().collect();
         assert_eq!(cmds.len(), 2);
         assert_eq!(cmds[0], Command::Go(Direction::Right));
-        assert_eq!(cmds[1], Command::SwitchTo(crate::command::SwitchToTarget { x: 2, y: 1 }));
+        assert_eq!(
+            cmds[1],
+            Command::SwitchTo(crate::command::SwitchTo::new(2, 1))
+        );
     }
 }
 
