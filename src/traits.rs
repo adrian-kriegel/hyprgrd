@@ -5,7 +5,11 @@
 //! …) implements one of these traits.  The [`GridSwitcher`](crate::switcher::GridSwitcher)
 //! only depends on these abstractions.
 
-use crate::{command::{Command, MonitorInfo, WindowInfo}, common::GridPosition};
+use crate::{
+    command::{MonitorInfo, WindowInfo},
+    common::GridPosition,
+    event::Event,
+};
 use std::sync::mpsc;
 
 /// Payload for visualizer events that show the overlay (ShowAuto, ToggleManual).
@@ -144,33 +148,29 @@ pub enum VisualizerEvent {
     Hide,
 }
 
-//  Command Source 
+//  Event Source 
 
-/// A source of [`Command`]s.
+/// A source of [`Event`]s.
 ///
 /// Implementations listen on some transport — a Unix socket, Hyprland's
-/// IPC event stream, an in-memory channel, … — and forward parsed commands
+/// IPC event stream, an in-memory channel, … — and forward parsed events
 /// into the provided [`mpsc::Sender`].
 ///
 /// The trait is deliberately transport-agnostic: the switcher does not know
-/// (or care) whether commands come from a socket, a gesture recognizer, or
+/// (or care) whether events come from a socket, a gesture recognizer, or
 /// a test harness.
 ///
 /// # Contract
 ///
-/// * [`run`](CommandSource::run) **blocks** until the source is exhausted or
+/// * [`run`](EventSource::run) **blocks** until the source is exhausted or
 ///   an unrecoverable error occurs.
-/// * Each received command must be sent through `sink` exactly once.
 /// * Implementations must be [`Send`] so they can run on a dedicated thread.
-pub trait CommandSource: Send {
+pub trait EventSource: Send {
     /// The error type produced by this source.
     type Error: std::error::Error + Send + 'static;
 
-    /// Start listening and forward every incoming [`Command`] into `sink`.
-    ///
-    /// This method blocks the calling thread.  To run multiple sources
-    /// concurrently, spawn each one on its own thread.
-    fn run(&mut self, sink: mpsc::Sender<Command>) -> Result<(), Self::Error>;
+    /// Blocks until the source is exhausted or an unrecoverable error occurs.
+    fn run(&mut self, sink: mpsc::Sender<Event>) -> Result<(), Self::Error>;
 }
 
 #[cfg(test)]
@@ -243,40 +243,40 @@ mod tests {
         assert_eq!(wm.switch_log.borrow()[0], ("MOCK-1".into(), pos));
     }
 
-    //  Mock CommandSource 
+    //  Mock EventSource 
 
-    /// A test double that emits a fixed sequence of commands.
+    /// A test double that emits a fixed sequence of events.
     struct MockSource {
-        commands: Vec<Command>,
+        events: Vec<Event>,
     }
 
-    impl CommandSource for MockSource {
+    impl EventSource for MockSource {
         type Error = MockError;
 
-        fn run(&mut self, sink: mpsc::Sender<Command>) -> Result<(), MockError> {
-            for cmd in self.commands.drain(..) {
-                let _ = sink.send(cmd);
+        fn run(&mut self, sink: mpsc::Sender<Event>) -> Result<(), MockError> {
+            for event in self.events.drain(..) {
+                let _ = sink.send(event);
             }
             Ok(())
         }
     }
 
     #[test]
-    fn mock_source_emits_commands() {
+    fn mock_source_emits_events() {
         let mut src = MockSource {
-            commands: vec![
-                Command::Go(Direction::Right),
-                Command::SwitchTo(crate::command::SwitchTo::new(2, 1)),
+            events: vec![
+                Event::Command(Command::Go(Direction::Right)),
+                Event::Command(Command::SwitchTo(crate::command::SwitchTo::new(2, 1))),
             ],
         };
         let (tx, rx) = mpsc::channel();
         src.run(tx).unwrap();
-        let cmds: Vec<Command> = rx.try_iter().collect();
-        assert_eq!(cmds.len(), 2);
-        assert_eq!(cmds[0], Command::Go(Direction::Right));
+        let events: Vec<Event> = rx.try_iter().collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], Event::Command(Command::Go(Direction::Right)));
         assert_eq!(
-            cmds[1],
-            Command::SwitchTo(crate::command::SwitchTo::new(2, 1))
+            events[1],
+            Event::Command(Command::SwitchTo(crate::command::SwitchTo::new(2, 1)))
         );
     }
 }

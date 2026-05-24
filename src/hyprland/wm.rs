@@ -9,9 +9,8 @@ use crate::command::{MonitorInfo, WindowInfo};
 use crate::common::GridPosition;
 use crate::traits::WindowManager;
 use serde::Deserialize;
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+
+use crate::hyprland::ipc::{IPCError, ipc_dispatch, ipc_json};
 
 /// Hyprland-backed window manager.
 ///
@@ -20,16 +19,12 @@ use std::path::PathBuf;
 /// are spawned.
 pub struct HyprlandWm;
 
-/// Errors that can occur when talking to Hyprland.
-#[derive(Debug, thiserror::Error)]
-#[error("hyprland IPC error: {0}")]
-pub struct HyprlandWmError(String);
-
 impl Default for HyprlandWm {
     fn default() -> Self {
         Self
     }
 }
+
 
 impl HyprlandWm {
     /// Create a new handle.
@@ -38,57 +33,6 @@ impl HyprlandWm {
     /// IPC request.
     pub fn new() -> Self {
         Self
-    }
-}
-
-//  Direct Hyprland IPC helpers 
-
-/// Resolve the Hyprland command socket path.
-///
-/// Hyprland ≥ 0.40 stores its sockets at
-/// `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`.
-fn socket_path() -> Result<PathBuf, HyprlandWmError> {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .map_err(|_| HyprlandWmError("XDG_RUNTIME_DIR not set".into()))?;
-    let his = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
-        .map_err(|_| HyprlandWmError("HYPRLAND_INSTANCE_SIGNATURE not set".into()))?;
-    Ok(PathBuf::from(format!(
-        "{}/hypr/{}/.socket.sock",
-        runtime_dir, his
-    )))
-}
-
-/// Send a raw command to the Hyprland command socket and return the
-/// response as a string.
-fn ipc_request(command: &str) -> Result<String, HyprlandWmError> {
-    let path = socket_path()?;
-    let mut stream = UnixStream::connect(&path)
-        .map_err(|e| HyprlandWmError(format!("connect to {}: {}", path.display(), e)))?;
-
-    stream
-        .write_all(command.as_bytes())
-        .map_err(|e| HyprlandWmError(format!("write: {}", e)))?;
-
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .map_err(|e| HyprlandWmError(format!("read: {}", e)))?;
-
-    String::from_utf8(response).map_err(|e| HyprlandWmError(format!("utf-8: {}", e)))
-}
-
-/// Send a JSON data query (`j/<command>`) and return the raw JSON string.
-fn ipc_json(data_command: &str) -> Result<String, HyprlandWmError> {
-    ipc_request(&format!("j/{}", data_command))
-}
-
-/// Send a dispatch command and check for `"ok"`.
-fn ipc_dispatch(args: &str) -> Result<(), HyprlandWmError> {
-    let response = ipc_request(&format!("/dispatch {}", args))?;
-    if response.trim() == "ok" {
-        Ok(())
-    } else {
-        Err(HyprlandWmError(format!("dispatch error: {}", response)))
     }
 }
 
@@ -115,15 +59,15 @@ struct ActiveWindowJson {
 }
 
 /// Resolve a Hyprland monitor numeric id to its name by querying `j/monitors`.
-fn monitor_name_by_id(id: i64) -> Result<String, HyprlandWmError> {
+fn monitor_name_by_id(id: i64) -> Result<String, IPCError> {
     let json = ipc_json("monitors")?;
     let monitors: Vec<MonitorJson> =
-        serde_json::from_str(&json).map_err(|e| HyprlandWmError(format!("parse: {}", e)))?;
+        serde_json::from_str(&json).map_err(|e| IPCError(format!("parse: {}", e)))?;
     monitors
         .iter()
         .find(|m| m.id == id)
         .map(|m| m.name.clone())
-        .ok_or_else(|| HyprlandWmError(format!("unknown monitor id: {}", id)))
+        .ok_or_else(|| IPCError(format!("unknown monitor id: {}", id)))
 }
 
 /// Generate a unique name for a workspace from the monitor name and grid position
@@ -134,12 +78,12 @@ fn workspace_name(monitor: &str, position: GridPosition) -> String {
 //  WindowManager implementation 
 
 impl WindowManager for HyprlandWm {
-    type Error = HyprlandWmError;
+    type Error = IPCError;
 
     fn monitors(&self) -> Result<Vec<MonitorInfo>, Self::Error> {
         let json = ipc_json("monitors")?;
         let monitors: Vec<MonitorJson> =
-            serde_json::from_str(&json).map_err(|e| HyprlandWmError(format!("parse: {}", e)))?;
+            serde_json::from_str(&json).map_err(|e| IPCError(format!("parse: {}", e)))?;
         Ok(monitors
             .into_iter()
             .map(|m| MonitorInfo {
@@ -185,7 +129,7 @@ impl WindowManager for HyprlandWm {
     fn active_monitor(&self) -> Result<Option<String>, Self::Error> {
         let json = ipc_json("monitors")?;
         let monitors: Vec<MonitorJson> = serde_json::from_str(&json)
-            .map_err(|e| HyprlandWmError(format!("parse: {}", e)))?;
+            .map_err(|e| IPCError(format!("parse: {}", e)))?;
         Ok(monitors
             .into_iter()
             .find(|m| m.focused)
@@ -199,7 +143,7 @@ impl WindowManager for HyprlandWm {
             return Ok(None);
         }
         let w: ActiveWindowJson =
-            serde_json::from_str(&json).map_err(|e| HyprlandWmError(format!("parse: {}", e)))?;
+            serde_json::from_str(&json).map_err(|e| IPCError(format!("parse: {}", e)))?;
         let monitor_name = monitor_name_by_id(w.monitor)?;
         Ok(Some(WindowInfo {
             address: w.address,

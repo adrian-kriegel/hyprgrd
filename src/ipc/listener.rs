@@ -1,4 +1,4 @@
-//! Unix-socket [`CommandSource`] implementation.
+//! Unix-socket [`EventSource`] implementation.
 //!
 //! Binds a Unix stream socket and accepts one connection at a time.
 //! Each line received is parsed as a JSON-encoded [`WireCommand`](crate::command::wire::WireCommand)
@@ -18,15 +18,15 @@
 //! ```
 
 use crate::command::wire::WireCommand;
-use crate::command::Command;
-use crate::traits::CommandSource;
+use crate::event::Event;
+use crate::traits::EventSource;
 use log::{debug, error, info};
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-/// A [`CommandSource`] that listens on a Unix stream socket for
+/// A [`EventSource`] that listens on a Unix stream socket for
 /// JSON-encoded commands.
 ///
 /// Each accepted connection can send multiple newline-delimited JSON
@@ -46,7 +46,7 @@ pub enum UnixSocketError {
 impl UnixSocketListener {
     /// Create a new listener bound to `path`.
     ///
-    /// The socket file is created when [`run`](CommandSource::run) is called
+    /// The socket file is created when [`run`](EventSource::run) is called
     /// and removed when the source shuts down.
     pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
@@ -60,13 +60,13 @@ impl UnixSocketListener {
     }
 }
 
-impl CommandSource for UnixSocketListener {
+impl EventSource for UnixSocketListener {
     type Error = UnixSocketError;
 
     /// Bind the socket and start accepting connections.
     ///
     /// This method **blocks** indefinitely.  Run it on a dedicated thread.
-    fn run(&mut self, sink: mpsc::Sender<Command>) -> Result<(), Self::Error> {
+    fn run(&mut self, sink: mpsc::Sender<Event>) -> Result<(), Self::Error> {
         // Remove stale socket if present.
         let _ = std::fs::remove_file(&self.path);
 
@@ -84,7 +84,7 @@ impl CommandSource for UnixSocketListener {
                             Ok(text) => match WireCommand::parse_line(&text) {
                                 Ok(cmd) => {
                                     debug!("received {:?}", cmd);
-                                    if sink.send(cmd).is_err() {
+                                    if sink.send(Event::Command(cmd)).is_err() {
                                         info!("sink closed, shutting down");
                                         return Ok(());
                                     }
@@ -115,6 +115,7 @@ impl CommandSource for UnixSocketListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::Command;
     use crate::command::Direction;
     use std::io::Write;
     use std::os::unix::net::UnixStream;
@@ -139,7 +140,7 @@ mod tests {
         let path = tmp_socket_path();
         let path_clone = path.clone();
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Event>();
 
         // Run listener in a background thread.
         let _handle = std::thread::spawn(move || {
@@ -161,15 +162,15 @@ mod tests {
 
         // Collect commands (give the listener a moment to process).
         std::thread::sleep(std::time::Duration::from_millis(150));
-        let cmds: Vec<Command> = rx.try_iter().collect();
+        let events: Vec<Event> = rx.try_iter().collect();
 
-        assert_eq!(cmds.len(), 3);
-        assert_eq!(cmds[0], Command::Go(Direction::Right));
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0], Event::Command(Command::Go(Direction::Right)));
         assert_eq!(
-            cmds[1],
-            Command::SwitchTo(crate::command::SwitchTo::new(2, 1))
+            events[1],
+            Event::Command(Command::SwitchTo(crate::command::SwitchTo::new(2, 1)))
         );
-        assert_eq!(cmds[2], Command::CancelMove);
+        assert_eq!(events[2], Event::Command(Command::CancelMove));
 
         // Clean up.
         let _ = std::fs::remove_file(&path);
@@ -179,7 +180,7 @@ mod tests {
     fn malformed_json_does_not_crash() {
         let path = tmp_socket_path();
         let path2 = path.clone();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Event>();
 
         let _handle = std::thread::spawn(move || {
             let mut listener = UnixSocketListener::new(&path2);
@@ -196,10 +197,10 @@ mod tests {
         }
 
         std::thread::sleep(std::time::Duration::from_millis(150));
-        let cmds: Vec<Command> = rx.try_iter().collect();
+        let events: Vec<Event> = rx.try_iter().collect();
         // Only the valid command should have arrived.
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0], Command::Go(Direction::Right));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], Event::Command(Command::Go(Direction::Right)));
 
         let _ = std::fs::remove_file(&path);
     }

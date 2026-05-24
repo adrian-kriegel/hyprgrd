@@ -73,7 +73,7 @@ pub struct MonitorIndex(pub usize);
 
 /// Every action the grid switcher can perform.
 ///
-/// Commands are produced by [`CommandSource`](crate::traits::CommandSource)
+/// Commands are produced by [`EventSource`](crate::traits::EventSource)s
 /// implementations and consumed by the [`GridSwitcher`](crate::switcher::GridSwitcher).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Command {

@@ -8,10 +8,12 @@ use crate::command::{
     find_monitor_in_direction, Command, Direction, MonitorIndex, SwitchTo,
 };
 use crate::common::GridPosition;
+use crate::event::Event;
 use crate::grid::Grid;
 use crate::hyprland::gestures::{dominant_direction, normalised_swipe_offset, GestureConfig};
 use crate::traits::{VisualizerEvent, VisualizerShowPayload, VisualizerState, WindowManager};
 use log::{debug, info, warn};
+use std::collections::HashMap;
 use std::sync::mpsc;
 
 /// Possible errors from the switcher.
@@ -141,6 +143,57 @@ impl<W: WindowManager> GridSwitcher<W> {
         self.wm
             .monitors()
             .map_err(|e| SwitcherError::WindowManager(e.to_string()))
+    }
+
+    /// Process a single [`Event`].
+    pub fn handle_event(&mut self, event: Event) -> Result<(), SwitcherError> {
+        match event {
+            Event::Command(cmd) => self.handle(cmd),
+            Event::MonitorsChanged => self.refresh_monitors(),
+        }
+    }
+
+    pub fn refresh_monitors(&mut self) -> Result<(), SwitcherError> {
+        let monitors = self
+            .wm
+            .monitors()
+            .map_err(|e| SwitcherError::WindowManager(e.to_string()))?;
+        
+        self.reconcile_monitor_positions(monitors.into_iter().map(|m| m.name));
+
+        if self.monitor_positions.is_empty() {
+            return Ok(());
+        }
+
+        self.apply_current_workspace()?;
+
+        Ok(())
+    }
+
+    fn reconcile_monitor_positions<I>(&mut self, monitor_names: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let fallback_pos = self.position();
+
+        let old_by_name: HashMap<String, MonitorGridPosition> = self
+            .monitor_positions
+            .drain(..)
+            .map(|p| (p.name.clone(), p))
+            .collect();
+
+        self.monitor_positions = monitor_names
+            .into_iter()
+            .map(|name| {
+                old_by_name
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| MonitorGridPosition {
+                        name,
+                        grid_position: fallback_pos,
+                    })
+            })
+            .collect();
     }
 
     /// Process a single [`Command`].

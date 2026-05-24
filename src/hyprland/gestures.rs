@@ -32,7 +32,8 @@
 //! active window along.
 
 use crate::command::{Command, Direction};
-use crate::traits::CommandSource;
+use crate::event::Event;
+use crate::traits::EventSource;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
@@ -97,7 +98,7 @@ struct SwipeState {
     dy: f64,
 }
 
-/// A [`CommandSource`] that listens to Hyprland swipe events via the raw
+/// A [`EventSource`] that listens to Hyprland swipe events via the raw
 /// IPC event socket and emits grid commands.
 ///
 /// This struct connects directly to Hyprland's event socket (`socket2`)
@@ -206,7 +207,7 @@ fn handle_event(
     data: &str,
     state: &mut SwipeState,
     config: &GestureConfig,
-    sink: &mpsc::Sender<Command>,
+    sink: &mpsc::Sender<Event>,
 ) {
     match event {
         "swipebegin" => {
@@ -233,10 +234,10 @@ fn handle_event(
                     let norm_dx = clamp_unit(state.dx / config.sensitivity);
                     let norm_dy = clamp_unit(state.dy / config.sensitivity);
                     debug!("swipe update: dx={:.2} dy={:.2}", norm_dx, norm_dy);
-                    let _ = sink.send(Command::PrepareMove {
+                    let _ = sink.send(Event::Command(Command::PrepareMove {
                         dx: norm_dx,
                         dy: norm_dy,
-                    });
+                    }));
                 }
             }
         }
@@ -255,7 +256,7 @@ fn handle_event(
                 None => Command::CancelMove,
             };
             debug!("swipe end: {:?}", cmd);
-            let _ = sink.send(cmd);
+            let _ = sink.send(Event::Command(cmd));
 
             state.active = false;
             state.dx = 0.0;
@@ -267,7 +268,7 @@ fn handle_event(
     }
 }
 
-impl CommandSource for HyprlandGestureSource {
+impl EventSource for HyprlandGestureSource {
     type Error = HyprlandGestureError;
 
     /// Connect to Hyprland's event socket and start listening for swipe
@@ -275,7 +276,7 @@ impl CommandSource for HyprlandGestureSource {
     ///
     /// This method **blocks** forever (until the socket is closed or an
     /// error occurs).  Run it on a dedicated thread.
-    fn run(&mut self, sink: mpsc::Sender<Command>) -> Result<(), Self::Error> {
+    fn run(&mut self, sink: mpsc::Sender<Event>) -> Result<(), Self::Error> {
         let path = socket2_path()?;
         info!("connecting to socket2: {}", path.display());
         let stream = UnixStream::connect(&path)
@@ -445,7 +446,7 @@ mod tests {
     #[test]
     fn handle_event_swipe_update_accumulates_and_emits() {
         let cfg = GestureConfig::default();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Event>();
         let mut state = SwipeState {
             active: true,
             fingers: 3,
@@ -457,7 +458,11 @@ mod tests {
         assert_eq!(state.dx, 50.0);
         assert_eq!(state.dy, 10.0);
 
-        let cmd = rx.try_recv().unwrap();
+        let event = rx.try_recv().unwrap();
+        let cmd = match event {
+            Event::Command(cmd) => cmd,
+            other => panic!("expected command event, got {other:?}"),
+        };
         assert_eq!(
             cmd,
             Command::PrepareMove {
@@ -470,7 +475,7 @@ mod tests {
     #[test]
     fn handle_event_swipe_end_commits_right() {
         let cfg = GestureConfig::default();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Event>();
         let mut state = SwipeState {
             active: true,
             fingers: 3,
@@ -479,7 +484,11 @@ mod tests {
         };
 
         handle_event("swipeend", "3", &mut state, &cfg, &tx);
-        let cmd = rx.try_recv().unwrap();
+        let event = rx.try_recv().unwrap();
+        let cmd = match event {
+            Event::Command(cmd) => cmd,
+            other => panic!("expected command event, got {other:?}"),
+        };
         assert_eq!(cmd, Command::CommitMove(Direction::Right));
         assert!(!state.active);
     }
@@ -487,7 +496,7 @@ mod tests {
     #[test]
     fn handle_event_swipe_end_cancels_small_gesture() {
         let cfg = GestureConfig::default();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Event>();
         let mut state = SwipeState {
             active: true,
             fingers: 3,
@@ -496,14 +505,18 @@ mod tests {
         };
 
         handle_event("swipeend", "3", &mut state, &cfg, &tx);
-        let cmd = rx.try_recv().unwrap();
+        let event = rx.try_recv().unwrap();
+        let cmd = match event {
+            Event::Command(cmd) => cmd,
+            other => panic!("expected command event, got {other:?}"),
+        };
         assert_eq!(cmd, Command::CancelMove);
     }
 
     #[test]
     fn handle_event_four_finger_swipe_moves_window() {
         let cfg = GestureConfig::default();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Event>();
         let mut state = SwipeState {
             active: true,
             fingers: 4,
@@ -512,7 +525,11 @@ mod tests {
         };
 
         handle_event("swipeend", "4", &mut state, &cfg, &tx);
-        let cmd = rx.try_recv().unwrap();
+        let event = rx.try_recv().unwrap();
+        let cmd = match event {
+            Event::Command(cmd) => cmd,
+            other => panic!("expected command event, got {other:?}"),
+        };
         assert_eq!(cmd, Command::MoveWindowAndGo(Direction::Left));
     }
 
@@ -520,7 +537,7 @@ mod tests {
     #[test]
     fn full_gesture_simulation() {
         let cfg = GestureConfig::default();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Event>();
         let mut state = SwipeState::default();
 
         // Begin
@@ -535,24 +552,27 @@ mod tests {
         // End
         handle_event("swipeend", "3", &mut state, &cfg, &tx);
 
-        let cmds: Vec<Command> = rx.try_iter().collect();
+        let events: Vec<Event> = rx.try_iter().collect();
         // 10 PrepareMove + 1 CommitMove
-        assert_eq!(cmds.len(), 11);
+        assert_eq!(events.len(), 11);
 
-        // All intermediate commands are PrepareMove
-        for cmd in &cmds[..10] {
-            assert!(matches!(cmd, Command::PrepareMove { .. }));
+        // All intermediate events are PrepareMove commands
+        for event in &events[..10] {
+            assert!(matches!(event, Event::Command(Command::PrepareMove { .. })));
         }
 
-        // Final command commits rightward
-        assert_eq!(cmds[10], Command::CommitMove(Direction::Right));
+        // Final event commits rightward
+        assert_eq!(
+            events[10],
+            Event::Command(Command::CommitMove(Direction::Right))
+        );
     }
 
     /// Unknown events are silently ignored.
     #[test]
     fn unknown_events_ignored() {
         let cfg = GestureConfig::default();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Event>();
         let mut state = SwipeState::default();
 
         handle_event("workspace", "2", &mut state, &cfg, &tx);

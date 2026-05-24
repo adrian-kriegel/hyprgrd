@@ -1,18 +1,19 @@
 //! Entry point for the **hyprgrd** daemon.
 //!
-//! Spawns all configured [`CommandSource`](hyprgrd::traits::CommandSource)s
-//! on background threads and processes incoming commands on the main thread.
+//! Spawns all configured [`EventSource`](hyprgrd::traits::EventSource)s
+//! on background threads and processes incoming events on the main thread.
 //!
 //! When the `visualizer-gtk` feature is enabled the main thread runs the
 //! GLib main loop (GTK4 requires it) and polls the command channel from
 //! there.  Without the feature, a simple blocking loop is used instead.
 
-use hyprgrd::command::Command;
+use hyprgrd::event::Event;
 use hyprgrd::config::Config;
+use hyprgrd::hyprland::events::HyprlandEventListener;
 use hyprgrd::hyprland::wm::HyprlandWm;
 use hyprgrd::ipc::listener::UnixSocketListener;
 use hyprgrd::switcher::GridSwitcher;
-use hyprgrd::traits::{CommandSource, WindowManager};
+use hyprgrd::traits::{EventSource, WindowManager};
 use log::{error, info};
 use std::sync::mpsc;
 
@@ -138,15 +139,15 @@ fn run_daemon() {
     let mut switcher = GridSwitcher::new(wm, monitors);
     switcher.set_gesture_config(config.gestures.clone());
 
-    let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
+    let (event_tx, event_rx) = mpsc::channel::<Event>();
     #[cfg(feature = "visualizer-gtk")]
-    let cmd_tx_for_visualizer = cmd_tx.clone();
-    spawn_command_sources(cmd_tx);
+    let event_tx_for_visualizer = event_tx.clone();
+    spawn_event_sources(event_tx);
 
     #[cfg(feature = "visualizer-gtk")]
-    start_event_loop(switcher, cmd_rx, cmd_tx_for_visualizer, config);
+    start_event_loop(switcher, event_rx, event_tx_for_visualizer, config);
     #[cfg(not(feature = "visualizer-gtk"))]
-    start_event_loop(switcher, cmd_rx, config);
+    start_event_loop(switcher, event_rx, config);
 }
 
 /// Debug-visualizer-only mode.
@@ -167,11 +168,11 @@ fn run_debug_visualizer() {
         let mut switcher = GridSwitcher::new(NoopWm, monitors);
         switcher.set_gesture_config(config.gestures.clone());
 
-        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
-        let cmd_tx_for_visualizer = cmd_tx.clone();
-        spawn_command_sources(cmd_tx);
+        let (event_tx, event_rx) = mpsc::channel::<Event>();
+        let event_tx_for_visualizer = event_tx.clone();
+        spawn_event_sources(event_tx);
 
-        start_event_loop(switcher, cmd_rx, cmd_tx_for_visualizer, config);
+        start_event_loop(switcher, event_rx, event_tx_for_visualizer, config);
     }
 }
 
@@ -180,8 +181,8 @@ fn run_debug_visualizer() {
 #[cfg(feature = "visualizer-gtk")]
 fn start_event_loop<W: WindowManager + 'static>(
     mut switcher: GridSwitcher<W>,
-    cmd_rx: mpsc::Receiver<Command>,
-    cmd_tx_for_visualizer: mpsc::Sender<Command>,
+    event_rx: mpsc::Receiver<Event>,
+    event_tx_for_visualizer: mpsc::Sender<Event>,
     config: Config,
 ) {
     let (vis_tx, vis_rx) = mpsc::channel();
@@ -191,16 +192,16 @@ fn start_event_loop<W: WindowManager + 'static>(
 
     use std::cell::RefCell;
     let switcher = std::rc::Rc::new(RefCell::new(switcher));
-    let dispatch = Box::new(move |cmd: Command| {
-        if let Err(e) = switcher.borrow_mut().handle(cmd) {
-            error!(target: "hyprgrd::switcher", "command error: {}", e);
+    let dispatch = Box::new(move |event: Event| {
+        if let Err(e) = switcher.borrow_mut().handle_event(event) {
+            error!(target: "hyprgrd::switcher", "event error: {}", e);
         }
     });
 
     hyprgrd::visualizer::gtk::run_main_loop(
-        cmd_rx,
+        event_rx,
         vis_rx,
-        cmd_tx_for_visualizer,
+        event_tx_for_visualizer,
         dispatch,
         initial_state,
         Some(css_path()),
@@ -211,35 +212,45 @@ fn start_event_loop<W: WindowManager + 'static>(
 #[cfg(not(feature = "visualizer-gtk"))]
 fn start_event_loop<W: WindowManager>(
     mut switcher: GridSwitcher<W>,
-    cmd_rx: mpsc::Receiver<Command>,
+    event_rx: mpsc::Receiver<Event>,
     _config: Config,
 ) {
     info!("hyprgrd running");
-    for cmd in cmd_rx {
-        if let Err(e) = switcher.handle(cmd) {
-            error!("command error: {}", e);
+    for event in event_rx {
+        if let Err(e) = switcher.handle_event(event) {
+            error!("event error: {}", e);
         }
     }
-    info!("all command sources closed, exiting");
+    info!("all event sources closed, exiting");
 }
 
 //  Helpers 
 
-fn spawn_command_sources(tx: mpsc::Sender<Command>) {
+fn spawn_event_sources(tx: mpsc::Sender<Event>) {
     {
         let tx = tx.clone();
         let path = default_socket_path();
+
         std::thread::spawn(move || {
             let mut source = UnixSocketListener::new(&path);
+
             if let Err(e) = source.run(tx) {
                 error!("socket listener error: {}", e);
             }
         });
     }
 
-    // Swipe gestures arrive over the same Unix socket, sent by the
-    // hyprgrd Hyprland plugin (SwipeBegin / SwipeUpdate / SwipeEnd).
-    // No separate gesture thread is needed.
+    {
+        let tx = tx.clone();
+
+        std::thread::spawn(move || {
+            let mut source = HyprlandEventListener::new();
+
+            if let Err(e) = source.run(tx) {
+                error!("hyprland event listener error: {}", e);
+            }
+        });
+    }
 
     drop(tx);
 }

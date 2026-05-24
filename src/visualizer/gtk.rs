@@ -31,6 +31,7 @@
 use crate::command::{Command, MonitorInfo, SwitchTo};
 use crate::common::GridPosition;
 use crate::config::VisualizerConfig;
+use crate::event::Event;
 use crate::traits::{VisualizerEvent, VisualizerState};
 use gtk4::prelude::*;
 use gtk4::{gdk, glib};
@@ -453,10 +454,10 @@ fn get_active_monitor(
 /// forwards incoming commands via `dispatch`. It never holds a reference
 /// to the switcher.
 pub fn run_main_loop(
-    cmd_rx: mpsc::Receiver<Command>,
+    event_rx: mpsc::Receiver<Event>,
     vis_rx: mpsc::Receiver<VisualizerEvent>,
-    cmd_tx: mpsc::Sender<Command>,
-    dispatch: Box<dyn FnMut(Command)>,
+    event_tx: mpsc::Sender<Event>,
+    dispatch: Box<dyn FnMut(Event)>,
     initial_state: VisualizerState,
     css_path: Option<PathBuf>,
     vis_config: VisualizerConfig,
@@ -481,14 +482,14 @@ pub fn run_main_loop(
     let current_shown: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
     let on_cell_click: Rc<dyn Fn(GridPosition)> = {
-        let cmd_tx = cmd_tx.clone();
+        let event_tx = event_tx.clone();
         let shown_kind = Rc::clone(&shown_kind);
         Rc::new(move |pos| {
             if shown_kind.get() != ShownKind::ManuallyShown {
                 return;
             }
-            let cmd = Command::SwitchTo(SwitchTo::from_grid_position(pos));
-            if let Err(e) = cmd_tx.send(cmd) {
+            let event = Event::Command(Command::SwitchTo(SwitchTo::from_grid_position(pos)));
+            if let Err(e) = event_tx.send(event) {
                 error!(target: "hyprgrd::visualizer", "failed to dispatch cell click: {}", e);
             }
         })
@@ -521,13 +522,13 @@ pub fn run_main_loop(
     let on_cell_click_for_loop = Rc::clone(&on_cell_click);
     let vis_config_for_loop = vis_config.clone();
     glib::timeout_add_local(Duration::from_millis(16), move || {
-        // 1. Drain commands and forward to the switcher via the dispatch callback.
+        // 1. Drain events and forward to the switcher via the dispatch callback.
         let mut disconnected = false;
         loop {
-            match cmd_rx.try_recv() {
-                Ok(cmd) => {
-                    debug!("command: {:?}", cmd);
-                    dispatch_for_loop.borrow_mut()(cmd);
+            match event_rx.try_recv() {
+                Ok(event) => {
+                    debug!("event: {:?}", event);
+                    dispatch_for_loop.borrow_mut()(event);
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {

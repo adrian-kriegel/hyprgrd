@@ -1,5 +1,6 @@
 pub mod command;
 pub mod config;
+pub mod event;
 pub mod grid;
 pub mod hyprland;
 pub mod ipc;
