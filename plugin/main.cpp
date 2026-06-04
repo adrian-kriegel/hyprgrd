@@ -42,12 +42,29 @@
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/devices/IPointer.hpp>
 
+#ifndef HYPRGRD_FORCE_LEGACY_HOOKS
+#define HYPRGRD_FORCE_LEGACY_HOOKS 0
+#endif
+
+#if !HYPRGRD_FORCE_LEGACY_HOOKS && defined(__has_include)
+#if __has_include(<hyprland/src/event/EventBus.hpp>)
+#define HYPRGRD_HAS_EVENT_BUS 1
+#include <hyprland/src/event/EventBus.hpp>
+#endif
+#endif
+
+#ifndef HYPRGRD_HAS_EVENT_BUS
+#define HYPRGRD_HAS_EVENT_BUS 0
+#endif
+
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include <any>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 
 inline HANDLE PHANDLE = nullptr;
 
@@ -164,11 +181,23 @@ static void swipeDisconnect() {
     }
 }
 
-// Pointers returned by registerCallbackDynamic — prevent them from being
-// garbage-collected by the Hyprland allocator while the plugin is loaded.
+#if HYPRGRD_HAS_EVENT_BUS
+
+// New Hyprland API: typed signal listeners returned by Event::bus()->...listen().
+// Losing these pointers unregisters the listeners.
+static CHyprSignalListener g_swipeBeginCb;
+static CHyprSignalListener g_swipeUpdateCb;
+static CHyprSignalListener g_swipeEndCb;
+
+#else // #if HYPRGRD_HAS_EVENT_BUS
+
+// Old Hyprland API: pointers returned by registerCallbackDynamic.
+// Losing these pointers unregisters the callbacks.
 static SP<HOOK_CALLBACK_FN> g_swipeBeginCb;
 static SP<HOOK_CALLBACK_FN> g_swipeUpdateCb;
 static SP<HOOK_CALLBACK_FN> g_swipeEndCb;
+
+#endif // #if HYPRGRD_HAS_EVENT_BUS
 
 /// hyprgrd:movetomonitor <direction>
 ///
@@ -239,7 +268,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                                  " plugin=" + __hyprland_api_get_client_hash());
     }
 
-    //  Dispatchers (keyboard binds) 
+    //  Dispatchers (keyboard binds)
 
     HyprlandAPI::addDispatcherV2(PHANDLE, "hyprgrd:go",                 dispatchGo);
     HyprlandAPI::addDispatcherV2(PHANDLE, "hyprgrd:movego",             dispatchMoveGo);
@@ -248,12 +277,52 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "hyprgrd:movetomonitorindex", dispatchMoveToMonitorIndex);
     HyprlandAPI::addDispatcherV2(PHANDLE, "hyprgrd:togglevis",          dispatchToggleVis);
 
-    //  Swipe gesture hooks 
+    //  Swipe gesture hooks
     // Hook into Hyprland's swipe pipeline, forward events to the
     // daemon, and cancel the default workspace-swipe behaviour only
     // when we successfully take ownership (connected to daemon).
-    // Event payloads are IPointer::SSwipe*Event from Hyprland headers.
 
+#if HYPRGRD_HAS_EVENT_BUS
+
+    // New API: Event::bus() typed cancellable swipe signals.
+    g_swipeBeginCb = Event::bus()->m_events.gesture.swipe.begin.listen(
+        [](const IPointer::SSwipeBeginEvent& ev, Event::SCallbackInfo& info) {
+            const uint32_t fingers = ev.fingers;
+
+            if (swipeConnect()) {
+                g_swipeFingers = fingers;
+                swipeSend(buildSwipeBeginJson(g_swipeFingers));
+                info.cancelled = true;
+            } else {
+                info.cancelled = false;
+            }
+        });
+
+    g_swipeUpdateCb = Event::bus()->m_events.gesture.swipe.update.listen(
+        [](const IPointer::SSwipeUpdateEvent& ev, Event::SCallbackInfo& info) {
+            if (g_swipeFd < 0) {
+                info.cancelled = false;
+                return;
+            }
+
+            swipeSend(buildSwipeUpdateJson(ev.fingers, ev.delta.x, ev.delta.y));
+            info.cancelled = true;
+        });
+
+    g_swipeEndCb = Event::bus()->m_events.gesture.swipe.end.listen(
+        [](const IPointer::SSwipeEndEvent& /*ev*/, Event::SCallbackInfo& info) {
+            if (g_swipeFd >= 0) {
+                swipeSend(buildSwipeEndJson());
+                swipeDisconnect();
+                info.cancelled = true;
+            } else {
+                info.cancelled = false;
+            }
+        });
+
+#else // #if HYPRGRD_HAS_EVENT_BUS
+
+    // Old API: dynamic string-named callbacks with std::any payloads.
     g_swipeBeginCb = HyprlandAPI::registerCallbackDynamic(
         PHANDLE, "swipeBegin",
         [](void* /*thisptr*/, SCallbackInfo& info, std::any data) {
@@ -277,11 +346,13 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                 info.cancelled = false;
                 return;
             }
+
             if (auto* ev = std::any_cast<IPointer::SSwipeUpdateEvent>(&data)) {
                 swipeSend(buildSwipeUpdateJson(ev->fingers, ev->delta.x, ev->delta.y));
                 info.cancelled = true;
                 return;
             }
+
             // Layout mismatch: still cancel so we don't hand gesture back to Hyprland mid-swipe.
             swipeSend(buildSwipeUpdateJson(g_swipeFingers, 0.0, 0.0));
             info.cancelled = true;
@@ -299,10 +370,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
             }
         });
 
+#endif  // #if HYPRGRD_HAS_EVENT_BUS
+
     return {"hyprgrd", "Grid workspace switcher dispatchers + gesture forwarding", "hyprgrd", "0.2.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
+#if HYPRGRD_HAS_EVENT_BUS
+    g_swipeBeginCb.reset();
+    g_swipeUpdateCb.reset();
+    g_swipeEndCb.reset();
+#endif // #if HYPRGRD_HAS_EVENT_BUS
+
     swipeDisconnect();
 }
-
