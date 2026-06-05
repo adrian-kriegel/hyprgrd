@@ -206,6 +206,7 @@ impl<W: WindowManager> GridSwitcher<W> {
             Command::SwitchTo(target) => {
                 let pos = target.grid_position();
                 info!("switch to ({}, {})", pos.col, pos.row);
+                let origin = self.position();
                 self.grid.grow_to_contain(pos);
                 for mp in &mut self.monitor_positions {
                     mp.grid_position = pos;
@@ -215,7 +216,7 @@ impl<W: WindowManager> GridSwitcher<W> {
                     warn!("switch failed (will still finalize visualizer): {}", e);
                 }
                 // Always flash and hide the visualizer so the UI finalizes.
-                self.show_visualizer(0.0, 0.0);
+                self.show_visualizer(0.0, 0.0, origin);
                 self.hide_visualizer();
             }
 
@@ -275,7 +276,8 @@ impl<W: WindowManager> GridSwitcher<W> {
 
             Command::PrepareMove { dx, dy } => {
                 debug!("prepare move dx={:.2} dy={:.2}", dx, dy);
-                self.show_visualizer(dx, dy);
+                let origin = self.position();
+                self.show_visualizer(dx, dy, origin);
             }
 
             Command::CancelMove => {
@@ -332,7 +334,7 @@ impl<W: WindowManager> GridSwitcher<W> {
                 };
                 if let Some((norm_dx, norm_dy, commit_while)) = state {
                     debug!("swipe update: dx={:.2} dy={:.2}", norm_dx, norm_dy);
-                    self.show_visualizer(norm_dx, norm_dy);
+                    self.show_visualizer(norm_dx, norm_dy, self.position());
                     if let Some((dir, move_window)) = commit_while {
                         if let Err(e) = self.execute_swipe_commit(dir, move_window) {
                             warn!("swipe commit while dragging: {}", e);
@@ -374,9 +376,13 @@ impl<W: WindowManager> GridSwitcher<W> {
 
     /// Show the visualizer with the current grid state (plus gesture offsets)
     /// as an **automatically** shown overlay.
-    fn show_visualizer(&mut self, offset_x: f64, offset_y: f64) {
+    ///
+    /// `origin` is the grid cell the cursor should appear at *before* any
+    /// animation starts (see [`VisualizerState::origin`]).  For gesture
+    /// updates where the position hasn't changed, pass `self.position()`.
+    fn show_visualizer(&mut self, offset_x: f64, offset_y: f64, origin: GridPosition) {
         if let Some(tx) = &self.vis_tx {
-            let payload = self.visualizer_show_payload(offset_x, offset_y);
+            let payload = self.visualizer_show_payload(offset_x, offset_y, origin);
             let _ = tx.send(VisualizerEvent::ShowAuto(payload));
         }
     }
@@ -384,14 +390,15 @@ impl<W: WindowManager> GridSwitcher<W> {
     /// Toggle the visualizer in **manual** mode for the current grid state.
     fn toggle_manual_visualizer(&mut self) {
         if let Some(tx) = &self.vis_tx {
-            let payload = self.visualizer_show_payload(0.0, 0.0);
+            let origin = self.position();
+            let payload = self.visualizer_show_payload(0.0, 0.0, origin);
             let _ = tx.send(VisualizerEvent::ToggleManual(payload));
         }
     }
 
     /// Build a `VisualizerShowPayload` with state and monitor info.
-    fn visualizer_show_payload(&self, offset_x: f64, offset_y: f64) -> VisualizerShowPayload {
-        let state = self.visualizer_state(offset_x, offset_y);
+    fn visualizer_show_payload(&self, offset_x: f64, offset_y: f64, origin: GridPosition) -> VisualizerShowPayload {
+        let state = self.visualizer_state_with_origin(offset_x, offset_y, origin);
         let active_monitor_name = self
             .wm
             .active_monitor()
@@ -414,6 +421,17 @@ impl<W: WindowManager> GridSwitcher<W> {
     /// When gesture offsets are present, `target_cell` is set only once the
     /// offset reaches the commit threshold (same as "release to switch").
     pub fn visualizer_state(&self, offset_x: f64, offset_y: f64) -> VisualizerState {
+        self.visualizer_state_with_origin(offset_x, offset_y, self.position())
+    }
+
+    /// Like [`visualizer_state`](Self::visualizer_state) but allows specifying
+    /// an explicit animation origin.
+    fn visualizer_state_with_origin(
+        &self,
+        offset_x: f64,
+        offset_y: f64,
+        origin: GridPosition,
+    ) -> VisualizerState {
         let (cols, rows) = self.grid.dimensions();
         let position = self.position();
         let target_cell = dominant_direction(
@@ -424,6 +442,7 @@ impl<W: WindowManager> GridSwitcher<W> {
         .map(|dir| Grid::get_abs_from(dir, position));
         VisualizerState {
             target_cell,
+            origin,
             ..VisualizerState::new(cols, rows, position, offset_x, offset_y)
         }
     }
@@ -492,12 +511,13 @@ impl<W: WindowManager> GridSwitcher<W> {
 
     /// Core logic for a discrete workspace move in a direction.
     fn go(&mut self, dir: Direction) -> Result<(), SwitcherError> {
-        let pos = Grid::get_abs_from(dir, self.position());
+        let origin = self.position();
+        let pos = Grid::get_abs_from(dir, origin);
         self.grid.grow_to_contain(pos);
         for mp in &mut self.monitor_positions {
             mp.grid_position = pos;
         }
-        self.show_visualizer(0.0, 0.0);
+        self.show_visualizer(0.0, 0.0, origin);
         self.hide_visualizer();
         self.apply_current_workspace()?;
         Ok(())
@@ -945,6 +965,121 @@ mod tests {
         let mut s = make_switcher();
         s.handle(Command::MoveWindowToMonitorIndex(MonitorIndex(1))).unwrap();
         assert_eq!(s.position(), GridPosition::ORIGIN, "grid should not move");
+    }
+
+    //  Visualizer origin tracking tests 
+
+    /// Extract the `VisualizerState` from the first `ShowAuto` event in the
+    /// list, panicking if none is found.
+    fn first_show_state(events: &[VisualizerEvent]) -> &crate::traits::VisualizerState {
+        events.iter().find_map(|e| match e {
+            VisualizerEvent::ShowAuto(p) => Some(&p.state),
+            _ => None,
+        }).expect("expected at least one ShowAuto event")
+    }
+
+    #[test]
+    fn go_sets_origin_to_previous_position() {
+        let mut s = make_switcher();
+        let (tx, rx) = mpsc::channel();
+        s.set_visualizer(tx);
+
+        // Start at ORIGIN, go right → position becomes (1,0).
+        s.handle(Command::Go(Direction::Right)).unwrap();
+        let events: Vec<VisualizerEvent> = rx.try_iter().collect();
+        let state = first_show_state(&events);
+        assert_eq!(
+            state.origin,
+            GridPosition::ORIGIN,
+            "origin should be the cell *before* the move"
+        );
+        assert_eq!(state.position, GridPosition { col: 1, row: 0 });
+    }
+
+    #[test]
+    fn switch_to_sets_origin_to_previous_position() {
+        let mut s = make_switcher();
+        // Move to (1, 0) first.
+        s.handle(Command::Go(Direction::Right)).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        s.set_visualizer(tx);
+
+        // Now switch to (3, 2).
+        s.handle(Command::SwitchTo(SwitchTo::new(3, 2))).unwrap();
+        let events: Vec<VisualizerEvent> = rx.try_iter().collect();
+        let state = first_show_state(&events);
+        assert_eq!(
+            state.origin,
+            GridPosition { col: 1, row: 0 },
+            "origin should be the cell before the SwitchTo"
+        );
+        assert_eq!(state.position, GridPosition { col: 3, row: 2 });
+    }
+
+    #[test]
+    fn consecutive_goes_carry_correct_origins() {
+        let mut s = make_switcher();
+        let (tx, rx) = mpsc::channel();
+        s.set_visualizer(tx);
+
+        // Go right three times: ORIGIN → (1,0) → (2,0) → (3,0)
+        s.handle(Command::Go(Direction::Right)).unwrap();
+        s.handle(Command::Go(Direction::Right)).unwrap();
+        s.handle(Command::Go(Direction::Right)).unwrap();
+
+        let events: Vec<VisualizerEvent> = rx.try_iter().collect();
+        let show_states: Vec<&crate::traits::VisualizerState> = events
+            .iter()
+            .filter_map(|e| match e {
+                VisualizerEvent::ShowAuto(p) => Some(&p.state),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(show_states.len(), 3);
+        // First go: origin=ORIGIN, position=(1,0)
+        assert_eq!(show_states[0].origin, GridPosition::ORIGIN);
+        assert_eq!(show_states[0].position, GridPosition { col: 1, row: 0 });
+        // Second go: origin=(1,0), position=(2,0)
+        assert_eq!(show_states[1].origin, GridPosition { col: 1, row: 0 });
+        assert_eq!(show_states[1].position, GridPosition { col: 2, row: 0 });
+        // Third go: origin=(2,0), position=(3,0)
+        assert_eq!(show_states[2].origin, GridPosition { col: 2, row: 0 });
+        assert_eq!(show_states[2].position, GridPosition { col: 3, row: 0 });
+    }
+
+    #[test]
+    fn gesture_prepare_move_origin_equals_position() {
+        let mut s = make_switcher();
+        // Move to (1,0) first.
+        s.handle(Command::Go(Direction::Right)).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        s.set_visualizer(tx);
+
+        // During a gesture, position hasn't changed yet.
+        s.handle(Command::PrepareMove { dx: 0.5, dy: 0.0 }).unwrap();
+        let events: Vec<VisualizerEvent> = rx.try_iter().collect();
+        let state = first_show_state(&events);
+        assert_eq!(
+            state.origin, state.position,
+            "during a gesture, origin should equal position (no discrete move)"
+        );
+    }
+
+    #[test]
+    fn commit_move_sets_origin_before_advance() {
+        let mut s = make_switcher();
+        let (tx, rx) = mpsc::channel();
+        s.set_visualizer(tx);
+
+        // CommitMove delegates to go(), so origin should be ORIGIN.
+        s.handle(Command::CommitMove(Direction::Down)).unwrap();
+        let events: Vec<VisualizerEvent> = rx.try_iter().collect();
+        let state = first_show_state(&events);
+        assert_eq!(state.origin, GridPosition::ORIGIN);
+        assert_eq!(state.position, GridPosition { col: 0, row: 1 });
     }
 }
 

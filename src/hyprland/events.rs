@@ -1,4 +1,3 @@
-use log::debug;
 
 use crate::event::Event;
 use crate::hyprland::ipc::{IPCError, event_socket_path};

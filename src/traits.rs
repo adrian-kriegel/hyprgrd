@@ -79,6 +79,15 @@ pub struct VisualizerState {
     pub rows: usize,
     /// Current grid cell.
     pub position: GridPosition,
+    /// Grid cell the cursor should appear at *before* animating to `position`.
+    ///
+    /// For discrete moves (Go, SwitchTo) this is the cell the switcher was on
+    /// before the move.  The visualizer uses it to correct a stale cached
+    /// cursor position — e.g. when overlay windows are kept per-monitor and
+    /// the user switches monitors between moves.
+    ///
+    /// For gestures and toggles this equals `position` (no move has occurred).
+    pub origin: GridPosition,
     /// Gesture offset on the X axis, normalised to `[-1.0, 1.0]`.
     /// `0.0` when no gesture is active.
     pub offset_x: f64,
@@ -103,6 +112,7 @@ impl VisualizerState {
             cols,
             rows,
             position,
+            origin: position,
             offset_x,
             offset_y,
             target_cell: None,

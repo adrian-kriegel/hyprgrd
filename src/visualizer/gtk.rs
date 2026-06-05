@@ -266,6 +266,16 @@ impl OverlayGrid {
         } else if is_gesture {
             self.snap(target_x, target_y);
         } else {
+            // For discrete moves, the state carries an `origin` — the cell the
+            // switcher was on *before* this move.  If our cached cursor position
+            // doesn't match, snap to the origin first so the animation always
+            // starts from the correct cell.
+            let origin_x = cell_px(state.origin.col);
+            let origin_y = cell_px(state.origin.row);
+            let (cx, cy) = (self.cur_x, self.cur_y);
+            if (origin_x - cx).abs() > 0.5 || (origin_y - cy).abs() > 0.5 {
+                self.snap(origin_x, origin_y);
+            }
             let (ctx, cty) = self.current_target();
             if (target_x - ctx).abs() > 0.5 || (target_y - cty).abs() > 0.5 {
                 self.animate_to(target_x, target_y);
