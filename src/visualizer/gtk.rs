@@ -538,6 +538,16 @@ pub fn run_main_loop(
             match event_rx.try_recv() {
                 Ok(event) => {
                     debug!("event: {:?}", event);
+                    if matches!(&event, Event::MonitorsChanged) {
+                        reset_overlay_cache(
+                            &overlays_for_loop,
+                            &current_shown_for_loop,
+                            &shown_kind_for_loop,
+                        );
+
+                        // Drop visualizer events generated against the old monitor topology.
+                        while vis_rx.try_recv().is_ok() {}
+                    }
                     dispatch_for_loop.borrow_mut()(event);
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -878,6 +888,37 @@ fn hide_currently_shown(
         overlay.visibility = Visibility::Lingering(Instant::now());
         let _ = linger_dur; // duration applied by the per-overlay state machine
     }
+}
+
+
+/// Drop cached GTK/layer-shell windows after a monitor topology change.
+///
+/// Cached layer-shell windows can outlive the GDK output
+/// objects they were bound to after hotplug, DPMS, dock/undock, or
+/// suspend/resume.
+fn reset_overlay_cache(
+    overlays: &Rc<RefCell<HashMap<String, MonitorOverlay>>>,
+    current_shown: &Rc<RefCell<Option<String>>>,
+    shown_kind: &Rc<Cell<ShownKind>>,
+) {
+    let mut overlays_mut = overlays.borrow_mut();
+    let count = overlays_mut.len();
+
+    if count > 0 {
+        info!(
+            target: "hyprgrd::visualizer",
+            "monitor topology changed; dropping {} cached layer-shell overlay window(s)",
+            count
+        );
+    }
+
+    for (_key, overlay) in overlays_mut.drain() {
+        overlay.window.set_visible(false);
+    }
+    drop(overlays_mut);
+
+    *current_shown.borrow_mut() = None;
+    shown_kind.set(ShownKind::Hidden);
 }
 
 //  CSS loading 

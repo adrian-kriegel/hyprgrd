@@ -359,7 +359,7 @@ impl<W: WindowManager> GridSwitcher<W> {
                             let move_window = swipe.fingers == cfg.move_fingers;
                             self.execute_swipe_commit(dir, move_window)?;
                         }
-                        None => {
+                        _ => {
                             debug!("swipe cancel (below threshold) — switch to current workspace");
                             self.handle(Command::SwitchTo(SwitchTo::from_grid_position(
                                 self.position(),
